@@ -174,10 +174,12 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
 #else
   // Flush to the true screen edge (small radius) rather than the old large
   // outer rounding, which left the background color visible in the real
-  // corners on rectangular hardware. The inner curve is unchanged.
+  // corners on rectangular hardware. The inner curve is unchanged. Border
+  // thickness widened from 4 to 8 to better match the intended visual
+  // weight - 4px read as a thin outline on real hardware, not a bezel.
   graphics_fill_rect(ctx, bounds, 4, GCornersAll);
-  GRect inner = GRect(bounds.origin.x + 4, bounds.origin.y + 4,
-                       bounds.size.w - 8, bounds.size.h - 8);
+  GRect inner = GRect(bounds.origin.x + 8, bounds.origin.y + 8,
+                       bounds.size.w - 16, bounds.size.h - 16);
   graphics_context_set_fill_color(ctx, s_discrete_bg_color);
   graphics_fill_rect(ctx, inner, 13, GCornersAll);
 #endif
@@ -581,18 +583,21 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
   layer_add_child(window_layer, s_basic_container);
 
   s_intensity_layer = text_layer_create(GRect(content_x, content_h / 2 - 60, basic_width, 54));
+  text_layer_set_background_color(s_intensity_layer, GColorClear);
   text_layer_set_font(s_intensity_layer, fonts_get_system_font(FONT_KEY_LECO_36_BOLD_NUMBERS));
   text_layer_set_text_alignment(s_intensity_layer, GTextAlignmentCenter);
   text_layer_set_text(s_intensity_layer, "0");
   layer_add_child(s_basic_container, text_layer_get_layer(s_intensity_layer));
 
   s_status_layer = text_layer_create(GRect(content_x, content_h / 2 - 6, basic_width, 26));
+  text_layer_set_background_color(s_status_layer, GColorClear);
   text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
   text_layer_set_text(s_status_layer, "PAUSED");
   layer_add_child(s_basic_container, text_layer_get_layer(s_status_layer));
 
   s_pattern_layer = text_layer_create(GRect(content_x, content_h / 2 + 20, basic_width, 22));
+  text_layer_set_background_color(s_pattern_layer, GColorClear);
   text_layer_set_font(s_pattern_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_pattern_layer, GTextAlignmentCenter);
   text_layer_set_text(s_pattern_layer, "STEADY");
@@ -603,6 +608,7 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
 #else
   s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 42, basic_width - 4, 42));
 #endif
+  text_layer_set_background_color(s_tip_layer, GColorClear);
   text_layer_set_font(s_tip_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_tip_layer, GTextAlignmentCenter);
   text_layer_set_text(s_tip_layer, TIP_DEFAULT_TEXT);
@@ -648,18 +654,16 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
 
   int center_y = bounds.size.h / 2;
 #if defined(PBL_ROUND)
-  int day_row_y = 32;
-  int time_y_offset = -34;
-  int date_y_offset = 16;
-  int toy_y_offset = 38;
-  int corner_margin = 30;
+  int corner_margin = 30; // round screens need more horizontal clearance near the top
 #else
-  int day_row_y = 18;
-  int time_y_offset = -40;
-  int date_y_offset = 14;
-  int toy_y_offset = 36;
   int corner_margin = 10;
 #endif
+  // BT/battery sit in the top corners (matching the original mockup), day
+  // row just below them. Time/date/toy are positioned relative to the true
+  // vertical center, now that the bottom of the screen isn't needed for
+  // status glyphs anymore.
+  int status_row_y = 10;
+  int day_row_y = 34;
 
   s_discrete_container = layer_create(bounds);
   layer_add_child(window_layer, s_discrete_container);
@@ -672,20 +676,20 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   layer_set_update_proc(s_day_row_layer, day_row_update_proc);
   layer_add_child(s_discrete_container, s_day_row_layer);
 
-  s_bt_layer = text_layer_create(GRect(corner_margin, bounds.size.h - 26, 40, 18));
+  s_bt_layer = text_layer_create(GRect(corner_margin, status_row_y, 40, 18));
   text_layer_set_background_color(s_bt_layer, GColorClear);
   text_layer_set_text_color(s_bt_layer, COLOR_LCD_MUTED);
   text_layer_set_font(s_bt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   layer_add_child(s_discrete_container, text_layer_get_layer(s_bt_layer));
 
-  s_battery_layer = text_layer_create(GRect(bounds.size.w - 40 - corner_margin, bounds.size.h - 26, 40, 18));
+  s_battery_layer = text_layer_create(GRect(bounds.size.w - 40 - corner_margin, status_row_y, 40, 18));
   text_layer_set_background_color(s_battery_layer, GColorClear);
   text_layer_set_text_color(s_battery_layer, COLOR_LCD_MUTED);
   text_layer_set_font(s_battery_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_battery_layer, GTextAlignmentRight);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_battery_layer));
 
-  s_time_layer = text_layer_create(GRect(0, center_y + time_y_offset, bounds.size.w, 50));
+  s_time_layer = text_layer_create(GRect(0, center_y - 25, bounds.size.w, 50));
   text_layer_set_background_color(s_time_layer, GColorClear);
   text_layer_set_text_color(s_time_layer, s_discrete_text_color);
   text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS));
@@ -693,7 +697,7 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   text_layer_set_text(s_time_layer, "--:--:--");
   layer_add_child(s_discrete_container, text_layer_get_layer(s_time_layer));
 
-  s_date_layer = text_layer_create(GRect(0, center_y + date_y_offset, bounds.size.w, 20));
+  s_date_layer = text_layer_create(GRect(0, center_y + 28, bounds.size.w, 20));
   text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, COLOR_LCD_MUTED);
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
@@ -701,7 +705,7 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   text_layer_set_text(s_date_layer, "");
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
 
-  s_toy_layer = text_layer_create(GRect(0, center_y + toy_y_offset, bounds.size.w, 18));
+  s_toy_layer = text_layer_create(GRect(0, center_y + 50, bounds.size.w, 18));
   text_layer_set_background_color(s_toy_layer, GColorClear);
   text_layer_set_text_color(s_toy_layer, s_discrete_text_color);
   text_layer_set_font(s_toy_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));

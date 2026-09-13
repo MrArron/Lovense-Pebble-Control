@@ -544,6 +544,8 @@ Pebble.addEventListener('showConfiguration', function () {
     '.tab.active{background:#e0245e;color:#fff}' +
     '.preset-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px}' +
     '.preset-tile{text-align:center;cursor:pointer}' +
+    '.preset-tile.selected .preset-swatch{box-shadow:0 0 0 2px #fff}' +
+    '.preset-tile:not(.selected){opacity:0.7}' +
     '.preset-swatch{width:100%;aspect-ratio:1;border-radius:10px;padding:4px}' +
     '.preset-inner{width:100%;height:100%;border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:9px;font-weight:700}' +
     '.preset-tile span{font-size:10px;color:#eee}' +
@@ -623,6 +625,12 @@ Pebble.addEventListener('showConfiguration', function () {
     'swatches[i].className = swatches[i].getAttribute("data-color").toLowerCase()===value.toLowerCase() ? "swatch selected" : "swatch";' +
     '}' +
     '}' +
+    'function markPresetSelected(index){' +
+    'var tiles = document.getElementsByClassName("preset-tile");' +
+    'for(var i=0;i<tiles.length;i++){' +
+    'tiles[i].className = (i===index) ? "preset-tile selected" : "preset-tile";' +
+    '}' +
+    '}' +
     'function applyPreset(index){' +
     'var p = PRESETS[index];' +
     'setField("basicColorBg", p.bg);' +
@@ -631,9 +639,21 @@ Pebble.addEventListener('showConfiguration', function () {
     'setField("discreteColorBezel", p.bezel);' +
     'setField("discreteColorBg", p.bg);' +
     'setField("discreteColorText", p.text);' +
-    'var tiles = document.getElementsByClassName("preset-tile");' +
-    'for(var i=0;i<tiles.length;i++){tiles[i].style.opacity = (i===index) ? "1" : "0.55";}' +
+    'markPresetSelected(index);' +
     '}' +
+    'function highlightMatchingPreset(){' +
+    'var bg = document.getElementById("basicColorBg").value.toLowerCase();' +
+    'var text = document.getElementById("basicColorText").value.toLowerCase();' +
+    'var accent = document.getElementById("basicColorAccent").value.toLowerCase();' +
+    'for(var i=0;i<PRESETS.length;i++){' +
+    'var p = PRESETS[i];' +
+    'if(p.bg.toLowerCase()===bg && p.text.toLowerCase()===text && p.bezel.toLowerCase()===accent){' +
+    'markPresetSelected(i);' +
+    'return;' +
+    '}' +
+    '}' +
+    '}' +
+    'highlightMatchingPreset();' +
     'function pickColor(el){' +
     'var row=el.parentNode;' +
     'var swatches=row.getElementsByClassName("swatch");' +
