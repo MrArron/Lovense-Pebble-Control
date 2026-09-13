@@ -154,12 +154,14 @@ static void window_unload(Window *window) {
   layer_destroy(s_button_bar_layer);
 }
 
-static void init(void) {
-  log_heap("init start");
+static void deferred_setup(void *data) {
+  // Everything below was previously done synchronously in init(), immediately
+  // after window_create() and before window_stack_push(). This version
+  // delays all of it until 300ms after the window is already on screen, to
+  // test whether the crash is a timing/handoff race with Dashboard (the
+  // launcher) rather than anything about these calls themselves.
+  log_heap("deferred_setup start");
 
-  // Same persisted-color-loading pattern as the real app - reads six keys
-  // that (on a watch that's had the real app installed before) may already
-  // hold data from it.
   int ui_style = persist_exists(PERSIST_KEY_UI_STYLE)
     ? persist_read_int(PERSIST_KEY_UI_STYLE) : 0;
   GColor basic_bg = persist_exists(PERSIST_KEY_BASIC_BG)
@@ -174,19 +176,13 @@ static void init(void) {
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_BG)) : GColorPastelYellow;
   GColor discrete_text = persist_exists(PERSIST_KEY_DISCRETE_TEXT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_TEXT)) : GColorBlack;
-  // Reference them so the compiler can't optimize the reads away.
   APP_LOG(APP_LOG_LEVEL_INFO, "loaded persisted values, ui_style=%d argb=%d,%d,%d,%d,%d,%d",
           ui_style, basic_bg.argb, basic_text.argb, basic_accent.argb,
           discrete_bezel.argb, discrete_bg.argb, discrete_text.argb);
   log_heap("after persist reads");
 
-  s_window = window_create();
-  window_set_window_handlers(s_window, (WindowHandlers) {
-    .load = window_load,
-    .unload = window_unload,
-  });
   window_set_click_config_provider(s_window, click_config_provider);
-  log_heap("after window_create");
+  log_heap("after click config provider");
 
   app_message_register_inbox_received(inbox_received_callback);
   app_message_register_inbox_dropped(inbox_dropped_callback);
@@ -194,9 +190,21 @@ static void init(void) {
   log_heap("after app_message_open");
 
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
-  log_heap("init end");
+  log_heap("deferred_setup end");
+}
+
+static void init(void) {
+  log_heap("init start");
+
+  s_window = window_create();
+  window_set_window_handlers(s_window, (WindowHandlers) {
+    .load = window_load,
+    .unload = window_unload,
+  });
+  log_heap("init end (window not yet pushed)");
 
   window_stack_push(s_window, true);
+  app_timer_register(300, deferred_setup, NULL);
 }
 
 static void deinit(void) {
