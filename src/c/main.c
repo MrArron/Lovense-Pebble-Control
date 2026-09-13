@@ -204,7 +204,9 @@ static void init(void) {
   log_heap("init end (window not yet pushed)");
 
   window_stack_push(s_window, true);
-  app_timer_register(300, deferred_setup, NULL);
+  // No deferral this time - runs immediately instead of via app_timer_register,
+  // to check whether the earlier 300ms delay was actually load-bearing.
+  deferred_setup(NULL);
 }
 
 static void deinit(void) {
