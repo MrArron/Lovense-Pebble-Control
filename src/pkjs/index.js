@@ -17,6 +17,41 @@ function buildUrl() {
   return 'http://' + host + ':' + port + '/command';
 }
 
+// --- Outgoing AppMessage queue ---
+// Pebble.sendAppMessage() doesn't queue multiple in-flight sends for you -
+// firing several before the previous one is acked/nacked by the watch
+// causes APP_MSG_BUSY drops on the watch side. Everything we send to the
+// watch goes through here instead of calling Pebble.sendAppMessage directly,
+// so messages are always delivered one at a time, in order.
+var s_outgoingQueue = [];
+var s_sendingMessage = false;
+
+function drainAppMessageQueue() {
+  if (s_sendingMessage || s_outgoingQueue.length === 0) {
+    return;
+  }
+  s_sendingMessage = true;
+  var next = s_outgoingQueue.shift();
+  Pebble.sendAppMessage(next.payload, function (e) {
+    s_sendingMessage = false;
+    if (next.onSuccess) {
+      next.onSuccess(e);
+    }
+    drainAppMessageQueue();
+  }, function (e) {
+    s_sendingMessage = false;
+    if (next.onError) {
+      next.onError(e);
+    }
+    drainAppMessageQueue();
+  });
+}
+
+function queueAppMessage(payload, onSuccess, onError) {
+  s_outgoingQueue.push({ payload: payload, onSuccess: onSuccess, onError: onError });
+  drainAppMessageQueue();
+}
+
 var APP_NAME = 'Lovense Remote for Pebble';
 
 function postCommand(bodyObj) {
@@ -81,7 +116,7 @@ function currentToyId() {
 }
 
 function sendToyNameToWatch(name) {
-  Pebble.sendAppMessage({ toy_name: name }, function () {
+  queueAppMessage({ toy_name: name }, function () {
     // delivered
   }, function () {
     console.log('Failed to send toy name to watch.');
@@ -154,7 +189,7 @@ function reportToyConnected(connected) {
     return;
   }
   s_lastKnownConnected = connected;
-  Pebble.sendAppMessage({ toy_connected: connected ? 1 : 0 }, function () {
+  queueAppMessage({ toy_connected: connected ? 1 : 0 }, function () {
     // delivered
   }, function () {
     console.log('Failed to send toy connection status to watch.');
@@ -343,7 +378,7 @@ function connectToyEvents() {
 }
 
 function sendUiStyleToWatch(uiStyle) {
-  Pebble.sendAppMessage({ ui_style: uiStyle === 'discrete' ? 1 : 0 }, function () {
+  queueAppMessage({ ui_style: uiStyle === 'discrete' ? 1 : 0 }, function () {
     // delivered
   }, function () {
     console.log('Failed to send UI style to watch.');
@@ -351,7 +386,7 @@ function sendUiStyleToWatch(uiStyle) {
 }
 
 function sendBasicColorsToWatch() {
-  Pebble.sendAppMessage({
+  queueAppMessage({
     basic_bg_color: getSetting('basicColorBg', '#ffffff'),
     basic_text_color: getSetting('basicColorText', '#000000'),
     basic_accent_color: getSetting('basicColorAccent', '#e0245e')
@@ -363,7 +398,7 @@ function sendBasicColorsToWatch() {
 }
 
 function sendDiscreteColorsToWatch() {
-  Pebble.sendAppMessage({
+  queueAppMessage({
     discrete_bezel_color: getSetting('discreteColorBezel', '#7a1f1f'),
     discrete_bg_color: getSetting('discreteColorBg', '#f5e9a8'),
     discrete_text_color: getSetting('discreteColorText', '#000000')

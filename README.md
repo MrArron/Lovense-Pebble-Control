@@ -262,6 +262,23 @@ untested-on-real-hardware, (c) the WebSocket-based Toy Events client on the
 phone side, though a phone-side JS issue wouldn't typically produce a watch
 `App fault!` like this.
 
+## Outgoing AppMessage queue
+
+`Pebble.sendAppMessage()` doesn't queue multiple in-flight sends for you —
+calling it again before the watch has acked or nacked the previous message
+causes the new one to be dropped with `APP_MSG_BUSY` (error code 64) on the
+watch side. This surfaced for real: the `ready` handler fires off the UI
+style, then Basic's three colors, then Discrete's three colors, and once all
+three sends went out, the third one started losing that race.
+
+Every place `index.js` used to call `Pebble.sendAppMessage()` directly now
+goes through `queueAppMessage()` instead, which pushes onto `s_outgoingQueue`
+and only calls `Pebble.sendAppMessage()` for the next queued message once the
+current one's success or error callback has fired. Messages are now always
+delivered one at a time, in the order they were queued, regardless of how
+many get triggered in a burst (like on `ready`, or when several color
+settings are saved from the config page at once).
+
 ## Other Lovense API features worth considering
 
 While confirming the Preset/Pattern schemas and building the Events API
