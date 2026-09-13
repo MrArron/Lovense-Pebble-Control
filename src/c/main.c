@@ -203,10 +203,12 @@ static void init(void) {
   });
   log_heap("init end (window not yet pushed)");
 
-  window_stack_push(s_window, true);
-  // No deferral this time - runs immediately instead of via app_timer_register,
-  // to check whether the earlier 300ms delay was actually load-bearing.
+  // Testing the ONE variable that differs from the last (working) run:
+  // AppMessage/tick-timer setup now happens BEFORE window_stack_push again,
+  // exactly like the version that crashed - instead of after, like the
+  // version that just worked. Nothing else has changed.
   deferred_setup(NULL);
+  window_stack_push(s_window, true);
 }
 
 static void deinit(void) {
