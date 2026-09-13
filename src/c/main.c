@@ -1,4 +1,5 @@
 #include <pebble.h>
+#include <stdlib.h>
 
 #define PERSIST_KEY_UI_STYLE 1
 #define PERSIST_KEY_BASIC_BG 2
@@ -151,12 +152,79 @@ static GColor color_from_packed(int packed) {
   return c;
 }
 
+static GColor parse_hex_color(const char *hex) {
+  int r = 0, g = 0, b = 0;
+  if (hex && hex[0] == '#' && strlen(hex) >= 7) {
+    char rs[3] = { hex[1], hex[2], 0 };
+    char gs[3] = { hex[3], hex[4], 0 };
+    char bs[3] = { hex[5], hex[6], 0 };
+    r = (int)strtol(rs, NULL, 16);
+    g = (int)strtol(gs, NULL, 16);
+    b = (int)strtol(bs, NULL, 16);
+  }
+  return GColorFromRGB(r, g, b);
+}
+
+static uint32_t packed_from_hex(const char *hex) {
+  GColor c = parse_hex_color(hex);
+  GColor8 raw = c;
+  return (uint32_t)raw.argb;
+}
+
+static GColor s_basic_bg_color;
+static GColor s_basic_text_color;
+static GColor s_basic_accent_color;
+
+static void apply_basic_colors(void) {
+  window_set_background_color(s_window, s_basic_bg_color);
+  if (!s_text_layer) {
+    return;
+  }
+  text_layer_set_text_color(s_text_layer, s_basic_text_color);
+  text_layer_set_text_color(s_status_layer, s_basic_text_color);
+  text_layer_set_text_color(s_tip_layer, s_basic_text_color);
+  text_layer_set_text_color(s_pattern_layer, s_basic_accent_color);
+  layer_mark_dirty(s_button_bar_layer);
+}
+
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   // Intentionally empty - just testing that subscribing doesn't crash.
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
-  // Intentionally empty.
+  log_heap("inbox_received_callback start");
+
+  // Now actually processes real incoming color messages, exactly like the
+  // reduced real app does - the previous no-op version never exercised this
+  // code path at all, because the old companion script never sent anything.
+  Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
+  if (bg_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got basic_bg_color=%s", bg_tuple->value->cstring);
+    s_basic_bg_color = parse_hex_color(bg_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_BASIC_BG, (int)packed_from_hex(bg_tuple->value->cstring));
+    apply_basic_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_basic_colors (bg) returned");
+  }
+
+  Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_basic_text_color);
+  if (text_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got basic_text_color=%s", text_tuple->value->cstring);
+    s_basic_text_color = parse_hex_color(text_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_BASIC_TEXT, (int)packed_from_hex(text_tuple->value->cstring));
+    apply_basic_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_basic_colors (text) returned");
+  }
+
+  Tuple *accent_tuple = dict_find(iterator, MESSAGE_KEY_basic_accent_color);
+  if (accent_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got basic_accent_color=%s", accent_tuple->value->cstring);
+    s_basic_accent_color = parse_hex_color(accent_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_BASIC_ACCENT, (int)packed_from_hex(accent_tuple->value->cstring));
+    apply_basic_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_basic_colors (accent) returned");
+  }
+
+  log_heap("after inbox_received_callback");
 }
 
 static void inbox_dropped_callback(AppMessageResult reason, void *context) {
@@ -200,6 +268,7 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_button_bar_layer, button_bar_update_proc);
   layer_add_child(s_container, s_button_bar_layer);
 
+  apply_basic_colors();
   log_heap("window_load end");
 }
 
@@ -222,11 +291,11 @@ static void deferred_setup(void *data) {
 
   int ui_style = persist_exists(PERSIST_KEY_UI_STYLE)
     ? persist_read_int(PERSIST_KEY_UI_STYLE) : 0;
-  GColor basic_bg = persist_exists(PERSIST_KEY_BASIC_BG)
+  s_basic_bg_color = persist_exists(PERSIST_KEY_BASIC_BG)
     ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_BG)) : GColorWhite;
-  GColor basic_text = persist_exists(PERSIST_KEY_BASIC_TEXT)
+  s_basic_text_color = persist_exists(PERSIST_KEY_BASIC_TEXT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_TEXT)) : GColorBlack;
-  GColor basic_accent = persist_exists(PERSIST_KEY_BASIC_ACCENT)
+  s_basic_accent_color = persist_exists(PERSIST_KEY_BASIC_ACCENT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_ACCENT)) : GColorBlack;
   GColor discrete_bezel = persist_exists(PERSIST_KEY_DISCRETE_BEZEL)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_BEZEL)) : GColorDarkCandyAppleRed;
@@ -235,7 +304,7 @@ static void deferred_setup(void *data) {
   GColor discrete_text = persist_exists(PERSIST_KEY_DISCRETE_TEXT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_TEXT)) : GColorBlack;
   APP_LOG(APP_LOG_LEVEL_INFO, "loaded persisted values, ui_style=%d argb=%d,%d,%d,%d,%d,%d",
-          ui_style, basic_bg.argb, basic_text.argb, basic_accent.argb,
+          ui_style, s_basic_bg_color.argb, s_basic_text_color.argb, s_basic_accent_color.argb,
           discrete_bezel.argb, discrete_bg.argb, discrete_text.argb);
   log_heap("after persist reads");
 
