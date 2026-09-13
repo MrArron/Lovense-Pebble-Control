@@ -1,4 +1,5 @@
 #include <pebble.h>
+#include <stdlib.h>
 
 // Lovense toys accept vibration intensity on a 0-20 scale over the Standard API.
 #define MAX_INTENSITY 20
@@ -7,6 +8,11 @@
 #define UI_STYLE_BASIC 0
 #define UI_STYLE_DISCRETE 1
 #define PERSIST_KEY_UI_STYLE 1
+#define PERSIST_KEY_BASIC_BG 2
+#define PERSIST_KEY_BASIC_TEXT 3
+#define PERSIST_KEY_BASIC_ACCENT 4
+
+#define TIP_DEFAULT_TEXT "Hold UP/DOWN\nto change pattern\nHold SELECT: toy"
 
 #define PATTERN_STEADY 0
 #define PATTERN_PULSE 1
@@ -14,6 +20,19 @@
 #define PATTERN_COUNT 3
 
 static const char *PATTERN_NAMES[PATTERN_COUNT] = { "STEADY", "PULSE", "WAVE" };
+
+// Haptic confirmation when cycling patterns: buzz count matches position in
+// the list above (1 buzz = Steady, 2 = Pulse, 3 = Wave). Works identically
+// in both UI styles and needs nothing on screen, so it's the one piece of
+// feedback that doesn't compromise Discrete mode's disguise.
+static const uint32_t HAPTIC_STEADY[] = { 100 };
+static const uint32_t HAPTIC_PULSE[] = { 100, 100, 100 };
+static const uint32_t HAPTIC_WAVE[] = { 100, 100, 100, 100, 100 };
+static const VibePattern HAPTIC_PATTERNS[PATTERN_COUNT] = {
+  { .durations = HAPTIC_STEADY, .num_segments = ARRAY_LENGTH(HAPTIC_STEADY) },
+  { .durations = HAPTIC_PULSE, .num_segments = ARRAY_LENGTH(HAPTIC_PULSE) },
+  { .durations = HAPTIC_WAVE, .num_segments = ARRAY_LENGTH(HAPTIC_WAVE) },
+};
 
 static Window *s_window;
 static ActionBarLayer *s_action_bar;
@@ -34,16 +53,111 @@ static TextLayer *s_tip_layer;
 // HH:MM:SS readout. Active/paused state is signaled only by that row's
 // color - no separate label anywhere.
 static Layer *s_discrete_container;
+static Layer *s_frame_layer;
 static TextLayer *s_time_layer;
 static TextLayer *s_date_layer;
+static TextLayer *s_toy_layer; // brief 5s reveal of the selected toy on cycling
+static TextLayer *s_battery_layer;
+static TextLayer *s_bt_layer;
+static TextLayer *s_day_layers[7];
 
 static int s_intensity = 0;
 static bool s_active = false; // true = vibrating, false = paused
 static int s_ui_style = UI_STYLE_BASIC;
 static int s_pattern = PATTERN_STEADY;
+static bool s_toy_connected = true; // optimistic until the phone reports otherwise
+static char s_toy_name[24] = "All Toys";
+static AppTimer *s_toy_display_timer = NULL;
+
+static GColor s_basic_bg_color;
+static GColor s_basic_text_color;
+static GColor s_basic_accent_color;
 
 static const GColor COLOR_TIME_ACTIVE = GColorRed;
-static const GColor COLOR_TIME_PAUSED = GColorWhite;
+static const GColor COLOR_TIME_PAUSED = GColorBlack;
+static const GColor COLOR_LCD_BG = GColorPastelYellow;         // pale LCD tint
+static const GColor COLOR_LCD_BORDER = GColorDarkCandyAppleRed; // red bezel
+static const GColor COLOR_LCD_MUTED = GColorArmyGreen;          // muted day letters
+
+static const char *WEEKDAY_LETTERS[7] = { "S", "M", "T", "W", "T", "F", "S" };
+
+static void frame_update_proc(Layer *layer, GContext *ctx) {
+  // Draws the pale LCD fill and red bezel as one opaque layer, so it
+  // doubles as the background for everything else in Discrete mode.
+  GRect bounds = layer_get_bounds(layer);
+  graphics_context_set_fill_color(ctx, COLOR_LCD_BORDER);
+  graphics_fill_rect(ctx, bounds, 16, GCornersAll);
+  GRect inner = GRect(bounds.origin.x + 4, bounds.origin.y + 4,
+                       bounds.size.w - 8, bounds.size.h - 8);
+  graphics_context_set_fill_color(ctx, COLOR_LCD_BG);
+  graphics_fill_rect(ctx, inner, 13, GCornersAll);
+}
+
+static void update_status_glyphs(void) {
+  BatteryChargeState battery = battery_state_service_peek();
+  static char battery_buf[8];
+  snprintf(battery_buf, sizeof(battery_buf), "%d%%", battery.charge_percent);
+  text_layer_set_text(s_battery_layer, battery_buf);
+}
+
+static void battery_handler(BatteryChargeState state) {
+  update_status_glyphs();
+}
+
+static void update_toy_connection_glyph(void) {
+  // Repurposes the corner glyph to show whether the Lovense toy is still
+  // connected to the phone (reported by index.js), not the watch's own
+  // Bluetooth link - that's a separate, less actionable piece of state.
+  text_layer_set_text(s_bt_layer, "BT");
+  text_layer_set_text_color(s_bt_layer, s_toy_connected ? COLOR_LCD_MUTED : COLOR_LCD_BORDER);
+}
+
+static void update_day_row(struct tm *tick_time) {
+  for (int i = 0; i < 7; i++) {
+    bool is_today = (i == tick_time->tm_wday);
+    text_layer_set_text_color(s_day_layers[i], is_today ? GColorBlack : COLOR_LCD_MUTED);
+  }
+}
+
+static GColor parse_hex_color(const char *hex) {
+  int r = 0, g = 0, b = 0;
+  if (hex && hex[0] == '#' && strlen(hex) >= 7) {
+    char rs[3] = { hex[1], hex[2], 0 };
+    char gs[3] = { hex[3], hex[4], 0 };
+    char bs[3] = { hex[5], hex[6], 0 };
+    r = (int)strtol(rs, NULL, 16);
+    g = (int)strtol(gs, NULL, 16);
+    b = (int)strtol(bs, NULL, 16);
+  }
+  return GColorFromRGB(r, g, b);
+}
+
+static uint32_t packed_from_hex(const char *hex) {
+  GColor c = parse_hex_color(hex);
+  GColor8 raw = c;
+  return (uint32_t)raw.argb; // stash the already-quantized 8-bit color directly
+}
+
+static GColor color_from_packed(int packed) {
+  GColor8 c;
+  c.argb = (uint8_t)packed;
+  return c;
+}
+
+static void toy_display_timeout_handler(void *data) {
+  s_toy_display_timer = NULL;
+  text_layer_set_text(s_toy_layer, "");
+  text_layer_set_text(s_tip_layer, TIP_DEFAULT_TEXT);
+}
+
+static void show_toy_name_briefly(void) {
+  text_layer_set_text(s_toy_layer, s_toy_name);
+  text_layer_set_text(s_tip_layer, s_toy_name);
+  if (s_toy_display_timer) {
+    app_timer_cancel(s_toy_display_timer);
+  }
+  s_toy_display_timer = app_timer_register(5000, toy_display_timeout_handler, NULL);
+}
 
 static void send_command_msg(const char *command, int intensity) {
   DictionaryIterator *iter;
@@ -67,13 +181,25 @@ static void apply_ui_style(void) {
   bool discrete = (s_ui_style == UI_STYLE_DISCRETE);
   layer_set_hidden(s_basic_container, discrete);
   layer_set_hidden(s_discrete_container, !discrete);
-  window_set_background_color(s_window, discrete ? GColorBlack : GColorWhite);
+  // The Discrete frame layer paints its own pale LCD background and red
+  // bezel over the full screen, so the window's own background color only
+  // matters for Basic mode.
+  window_set_background_color(s_window, s_basic_bg_color);
 
   if (discrete) {
     layer_set_hidden(action_bar_layer_get_layer(s_action_bar), true);
   } else {
     layer_set_hidden(action_bar_layer_get_layer(s_action_bar), false);
   }
+}
+
+static void apply_basic_colors(void) {
+  window_set_background_color(s_window, s_basic_bg_color);
+  text_layer_set_text_color(s_intensity_layer, s_basic_text_color);
+  text_layer_set_text_color(s_status_layer, s_basic_text_color);
+  text_layer_set_text_color(s_tip_layer, s_basic_text_color);
+  text_layer_set_text_color(s_pattern_layer, s_basic_accent_color);
+  action_bar_layer_set_background_color(s_action_bar, s_basic_accent_color);
 }
 
 static void update_basic_display(void) {
@@ -107,6 +233,8 @@ static void update_time_display(struct tm *tick_time) {
 
   strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
   text_layer_set_text(s_date_layer, date_buf);
+
+  update_day_row(tick_time);
 }
 
 static void refresh_discrete_time(void) {
@@ -127,9 +255,12 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
   update_display();
   refresh_discrete_time();
   // Only push to the toy live if we're currently active. While paused this
-  // just updates the level that resume will use.
+  // just updates the level that resume will use - but we still ping the
+  // phone so every button press gets a connectivity check.
   if (s_active) {
     send_command_msg("vibrate", s_intensity);
+  } else {
+    send_command_msg("ping", s_intensity);
   }
 }
 
@@ -142,6 +273,8 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
   refresh_discrete_time();
   if (s_active) {
     send_command_msg("vibrate", s_intensity);
+  } else {
+    send_command_msg("ping", s_intensity);
   }
 }
 
@@ -158,11 +291,15 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
 
 static void cycle_pattern(int direction) {
   s_pattern = (s_pattern + direction + PATTERN_COUNT) % PATTERN_COUNT;
+  vibes_enqueue_custom_pattern(HAPTIC_PATTERNS[s_pattern]);
   update_display();
   // If we're actively vibrating, restart the toy on the newly selected
-  // pattern right away. If paused, this just changes what resume will use.
+  // pattern right away. If paused, ping instead so this press still gets a
+  // connectivity check.
   if (s_active) {
     send_command_msg("vibrate", s_intensity);
+  } else {
+    send_command_msg("ping", s_intensity);
   }
 }
 
@@ -174,12 +311,19 @@ static void down_long_click_handler(ClickRecognizerRef recognizer, void *context
   cycle_pattern(-1);
 }
 
+static void select_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  // Ask the phone to cycle to the next toy (or "All Toys"). It replies with
+  // the new selection's name via MESSAGE_KEY_toy_name.
+  send_command_msg("next_toy", s_intensity);
+}
+
 static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
   window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
   window_long_click_subscribe(BUTTON_ID_UP, 700, up_long_click_handler, NULL);
   window_long_click_subscribe(BUTTON_ID_DOWN, 700, down_long_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_SELECT, 700, select_long_click_handler, NULL);
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
@@ -188,6 +332,40 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_ui_style = (int)ui_style_tuple->value->int32;
     persist_write_int(PERSIST_KEY_UI_STYLE, s_ui_style);
     apply_ui_style();
+  }
+
+  Tuple *toy_connected_tuple = dict_find(iterator, MESSAGE_KEY_toy_connected);
+  if (toy_connected_tuple) {
+    s_toy_connected = (bool)toy_connected_tuple->value->int32;
+    update_toy_connection_glyph();
+  }
+
+  Tuple *toy_name_tuple = dict_find(iterator, MESSAGE_KEY_toy_name);
+  if (toy_name_tuple) {
+    strncpy(s_toy_name, toy_name_tuple->value->cstring, sizeof(s_toy_name) - 1);
+    s_toy_name[sizeof(s_toy_name) - 1] = '\0';
+    show_toy_name_briefly();
+  }
+
+  Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
+  if (bg_tuple) {
+    s_basic_bg_color = parse_hex_color(bg_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_BASIC_BG, (int)packed_from_hex(bg_tuple->value->cstring));
+    apply_basic_colors();
+  }
+
+  Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_basic_text_color);
+  if (text_tuple) {
+    s_basic_text_color = parse_hex_color(text_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_BASIC_TEXT, (int)packed_from_hex(text_tuple->value->cstring));
+    apply_basic_colors();
+  }
+
+  Tuple *accent_tuple = dict_find(iterator, MESSAGE_KEY_basic_accent_color);
+  if (accent_tuple) {
+    s_basic_accent_color = parse_hex_color(accent_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_BASIC_ACCENT, (int)packed_from_hex(accent_tuple->value->cstring));
+    apply_basic_colors();
   }
 
   Tuple *command_tuple = dict_find(iterator, MESSAGE_KEY_command);
@@ -240,21 +418,49 @@ static void window_load(Window *window) {
   s_pattern_layer = text_layer_create(GRect(0, 94, basic_width, 22));
   text_layer_set_font(s_pattern_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_pattern_layer, GTextAlignmentCenter);
-  text_layer_set_text_color(s_pattern_layer, GColorDarkGray);
   text_layer_set_text(s_pattern_layer, "STEADY");
   layer_add_child(s_basic_container, text_layer_get_layer(s_pattern_layer));
 
   s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 42, basic_width - 4, 42));
   text_layer_set_font(s_tip_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_tip_layer, GTextAlignmentCenter);
-  text_layer_set_text(s_tip_layer, "Hold UP/DOWN\nto change pattern");
+  text_layer_set_text(s_tip_layer, TIP_DEFAULT_TEXT);
   layer_add_child(s_basic_container, text_layer_get_layer(s_tip_layer));
+
+  apply_basic_colors();
 
   // --- Discrete UI: looks like a plain minimalist watchface ---
   s_discrete_container = layer_create(bounds);
   layer_add_child(window_layer, s_discrete_container);
 
-  s_time_layer = text_layer_create(GRect(0, center_y - 30, bounds.size.w, 50));
+  s_frame_layer = layer_create(bounds);
+  layer_set_update_proc(s_frame_layer, frame_update_proc);
+  layer_add_child(s_discrete_container, s_frame_layer);
+
+  int day_width = (bounds.size.w - 16) / 7;
+  for (int i = 0; i < 7; i++) {
+    s_day_layers[i] = text_layer_create(GRect(8 + i * day_width, 18, day_width, 18));
+    text_layer_set_background_color(s_day_layers[i], GColorClear);
+    text_layer_set_font(s_day_layers[i], fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+    text_layer_set_text_alignment(s_day_layers[i], GTextAlignmentCenter);
+    text_layer_set_text(s_day_layers[i], WEEKDAY_LETTERS[i]);
+    layer_add_child(s_discrete_container, text_layer_get_layer(s_day_layers[i]));
+  }
+
+  s_bt_layer = text_layer_create(GRect(10, bounds.size.h - 26, 40, 18));
+  text_layer_set_background_color(s_bt_layer, GColorClear);
+  text_layer_set_text_color(s_bt_layer, COLOR_LCD_MUTED);
+  text_layer_set_font(s_bt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  layer_add_child(s_discrete_container, text_layer_get_layer(s_bt_layer));
+
+  s_battery_layer = text_layer_create(GRect(bounds.size.w - 50, bounds.size.h - 26, 40, 18));
+  text_layer_set_background_color(s_battery_layer, GColorClear);
+  text_layer_set_text_color(s_battery_layer, COLOR_LCD_MUTED);
+  text_layer_set_font(s_battery_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_battery_layer, GTextAlignmentRight);
+  layer_add_child(s_discrete_container, text_layer_get_layer(s_battery_layer));
+
+  s_time_layer = text_layer_create(GRect(0, center_y - 40, bounds.size.w, 50));
   text_layer_set_background_color(s_time_layer, GColorClear);
   text_layer_set_text_color(s_time_layer, COLOR_TIME_PAUSED);
   text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS));
@@ -262,13 +468,25 @@ static void window_load(Window *window) {
   text_layer_set_text(s_time_layer, "--:--:--");
   layer_add_child(s_discrete_container, text_layer_get_layer(s_time_layer));
 
-  s_date_layer = text_layer_create(GRect(0, center_y + 24, bounds.size.w, 24));
+  s_date_layer = text_layer_create(GRect(0, center_y + 14, bounds.size.w, 20));
   text_layer_set_background_color(s_date_layer, GColorClear);
-  text_layer_set_text_color(s_date_layer, GColorLightGray);
+  text_layer_set_text_color(s_date_layer, COLOR_LCD_MUTED);
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   text_layer_set_text(s_date_layer, "");
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
+
+  s_toy_layer = text_layer_create(GRect(0, center_y + 36, bounds.size.w, 18));
+  text_layer_set_background_color(s_toy_layer, GColorClear);
+  text_layer_set_text_color(s_toy_layer, GColorBlack);
+  text_layer_set_font(s_toy_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
+  text_layer_set_text_alignment(s_toy_layer, GTextAlignmentCenter);
+  text_layer_set_text(s_toy_layer, "");
+  layer_add_child(s_discrete_container, text_layer_get_layer(s_toy_layer));
+
+  battery_state_service_subscribe(battery_handler);
+  update_status_glyphs();
+  update_toy_connection_glyph();
 
   refresh_discrete_time();
   apply_ui_style();
@@ -276,6 +494,11 @@ static void window_load(Window *window) {
 }
 
 static void window_unload(Window *window) {
+  if (s_toy_display_timer) {
+    app_timer_cancel(s_toy_display_timer);
+    s_toy_display_timer = NULL;
+  }
+
   text_layer_destroy(s_intensity_layer);
   text_layer_destroy(s_status_layer);
   text_layer_destroy(s_pattern_layer);
@@ -284,6 +507,13 @@ static void window_unload(Window *window) {
 
   text_layer_destroy(s_time_layer);
   text_layer_destroy(s_date_layer);
+  text_layer_destroy(s_toy_layer);
+  text_layer_destroy(s_battery_layer);
+  text_layer_destroy(s_bt_layer);
+  for (int i = 0; i < 7; i++) {
+    text_layer_destroy(s_day_layers[i]);
+  }
+  layer_destroy(s_frame_layer);
   layer_destroy(s_discrete_container);
 
   action_bar_layer_destroy(s_action_bar);
@@ -297,6 +527,16 @@ static void init(void) {
   s_ui_style = persist_exists(PERSIST_KEY_UI_STYLE)
     ? persist_read_int(PERSIST_KEY_UI_STYLE)
     : UI_STYLE_BASIC;
+
+  s_basic_bg_color = persist_exists(PERSIST_KEY_BASIC_BG)
+    ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_BG))
+    : GColorWhite;
+  s_basic_text_color = persist_exists(PERSIST_KEY_BASIC_TEXT)
+    ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_TEXT))
+    : GColorBlack;
+  s_basic_accent_color = persist_exists(PERSIST_KEY_BASIC_ACCENT)
+    ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_ACCENT))
+    : parse_hex_color("#e0245e");
 
   s_window = window_create();
   window_set_window_handlers(s_window, (WindowHandlers) {
@@ -318,6 +558,7 @@ static void deinit(void) {
   // paused or active.
   send_command_msg("stop", 0);
   tick_timer_service_unsubscribe();
+  battery_state_service_unsubscribe();
   window_destroy(s_window);
 }
 

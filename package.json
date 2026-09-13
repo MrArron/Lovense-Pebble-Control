@@ -23,7 +23,12 @@
       "command",
       "intensity",
       "ui_style",
-      "pattern"
+      "pattern",
+      "toy_connected",
+      "toy_name",
+      "basic_bg_color",
+      "basic_text_color",
+      "basic_accent_color"
     ],
     "resources": {
       "media": [

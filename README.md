@@ -15,9 +15,10 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
   and, held, cycle patterns. SELECT pauses/resumes at the current level.
   Basic mode has an on-screen action bar; Discrete mode has none.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
-  Lovense Standard API calls (`POST /command`), runs the Pulse/Wave pattern
-  loops, and provides a small settings page for entering the Lovense app's
-  IP/port. Commands target every toy currently connected to Lovense Remote.
+  Lovense Standard API calls (`POST /command`), including native Pulse/Wave
+  pattern parameters and toy-connection polling, and provides a small
+  settings page for entering the Lovense app's IP/port. Commands target
+  every toy currently connected to Lovense Remote.
 - `resources/images/` — four small icons (up/down chevrons, pause, play) used
   by Basic mode's action bar.
 - `package.json` — project manifest (UUID, targets, AppMessage keys,
@@ -76,38 +77,139 @@ Same buttons regardless of display style:
   use.
 - **SELECT** — pause/resume. Pausing stops vibration but remembers the
   intensity; resuming sends that same level again.
+- **Hold SELECT** — cycle the target toy: All Toys → toy 1 → toy 2 → … →
+  back to All Toys. If you're actively vibrating, the running pattern moves
+  from the old target to the new one (old target stops, new one starts at
+  the same intensity/pattern); if paused, it just changes what the next
+  resume will target. The selection isn't persisted — it resets to All Toys
+  each time the watchapp is launched.
 
-All commands target every toy currently connected to Lovense Remote — there's
-no per-toy selection.
+All commands target whichever toy (or "All Toys") is currently selected.
 
 ### Display styles
 
 - **Basic** — a big number for the current intensity, a "VIBRATING"/"PAUSED"
   label, the current pattern name, and an on-screen action bar (chevrons for
   UP/DOWN, a pause/play icon for SELECT that swaps depending on state) with a
-  tooltip beneath explaining the hold-to-cycle-patterns gesture.
-- **Discrete** — disguised as an ordinary minimalist digital watchface, with
-  no action bar and no labels. Time and the disguised intensity share a
-  single row formatted like a real `HH:MM:SS` readout (e.g. `20:49:12`,
-  where `12` is the intensity, not real seconds) — day/date sits beneath. The
-  only sign of active/paused state is that row's color (white when paused,
-  red when vibrating). The current pattern isn't shown anywhere in this mode
-  by design — switch to Basic momentarily if you need to confirm it.
+  tooltip beneath explaining the hold gestures. Background, text, and accent
+  (pattern label + action bar) colors are all customizable from the phone's
+  settings page.
+- **Discrete** — disguised as an ordinary minimalist digital watchface,
+  styled after classic LCD watch faces: a pale background inside a red
+  bezel, a day-of-week row with today highlighted, and small
+  battery-percentage and toy-connection glyphs in the bottom corners, plus a
+  date row. Time and the disguised intensity share a single row formatted
+  like a real `HH:MM:SS` readout (e.g. `20:49:12`, where `12` is the
+  intensity, not real seconds). The only sign of active/paused state is that
+  row's color (black when paused, red when vibrating). The current pattern
+  isn't shown anywhere in this mode by design; instead, cycling patterns
+  gives a distinct number of short wrist buzzes (1 for Steady, 2 for Pulse,
+  3 for Wave) — a haptic tap looks like completely ordinary watch feedback,
+  so it doesn't compromise the disguise. Holding SELECT to change toy is the
+  one exception to "nothing shows on screen": the selected toy's name
+  appears under the date for 5 seconds, then disappears on its own.
 
 ## Patterns
 
-Steady sends a constant `Vibrate:N`. Pulse and Wave are built as timed loops
-of ordinary `Vibrate:N` calls on the phone (alternating on/off for Pulse,
-ramping up and down through a shape for Wave) rather than one of Lovense's
-built-in named presets — the Standard API's publicly documented commands only
-confirm `Function` (`Vibrate:N`) and `GetToys`; the exact JSON for built-in
-presets like `pulse`/`wave`/`fireworks` isn't pinned down anywhere public, so
-this avoids guessing at an unverified schema. If you get access to Lovense's
-full developer docs and confirm the real preset format, swapping it in is a
-small change to `startPulseLoop`/`startWaveLoop` in `index.js`.
+Steady sends a plain `Function`/`Vibrate:N`. Pulse and Wave now use Lovense's
+actual documented parameters rather than a client-side workaround:
+
+- **Pulse** sends one `Function` request with `loopRunningSec`/`loopPauseSec`
+  set (2 seconds on, 2 off), so the toy itself handles the on/off timing —
+  no repeated requests from the phone, and it still respects whatever
+  intensity you've set.
+- **Wave** sends a `Pattern` request — a short intensity sequence
+  (`rule`/`strength`) scaled to your chosen intensity, stepping every 400ms,
+  looped indefinitely (`timeSec: 0`). Again, one request, no phone-side timer.
+
+Both replace the original setInterval-based workaround, since Lovense's
+public developer docs (turned out to be readable without a login) confirm
+these parameters. Their named `Preset` command (`pulse`/`wave`/`fireworks`/
+`earthquake`) also works and is simpler, but doesn't accept an intensity
+parameter — using `loopRunningSec`/`Pattern` instead keeps your chosen
+intensity meaningful for Pulse and Wave, not just Steady.
 
 Pattern selection isn't persisted — it resets to Steady each time the
 watchapp is launched.
+
+## Toy connection detection
+
+The Discrete face's bottom-left glyph (labeled "BT") shows whether the
+Lovense toy itself is still connected to the phone — not the watch's own
+Bluetooth link to the phone, which is a separate, less useful signal. It's
+muted when connected, and switches to the bezel's red when not.
+
+The primary source is the **Toy Events API** — a WebSocket connection
+(`ws://{ip}:{port}/v1`) that pushes `toy-list` and `toy-status` events the
+instant a toy connects, disconnects, or is added/removed, rather than
+waiting on a poll. `index.js` connects to it on launch, sends the required
+`access` handshake and a `ping` every 5 seconds to keep it alive, and tracks
+each toy's connected state as events arrive. If Game Mode is turned off, an
+`event-closed` event fires and the socket closes; if it drops for any other
+reason (Wi-Fi hiccup, app restart), it retries every 10 seconds.
+
+The original `GetToys`-polling approach is kept as a fallback for whenever
+the socket isn't confirmed connected yet (right after launch, or while a
+reconnect is pending):
+
+- **While actively vibrating**: a `GetToys` check runs every 60 seconds,
+  plus on every button press (UP/DOWN, SELECT, pattern changes).
+- **While paused**: no periodic check — UP/DOWN don't send anything to the
+  toy while paused, so they send a lightweight `ping` command instead, just
+  to trigger a check without affecting the toy.
+
+Once the socket confirms access, both of these fall silent automatically
+(no wasted requests) and only resume if the socket disconnects.
+
+## Toy selection
+
+Hold SELECT cycles through All Toys plus every toy the phone currently knows
+about, sourced from the same data as the connection glyph (the Events API's
+`toy-list` when connected, `GetToys` as a fallback). Each toy's nickname
+(falling back to its model name) is what shows on the watch, truncated to 20
+characters.
+
+Under the hood, `index.js` keeps an ordered list (`All Toys` always first)
+and an index into it; outgoing `Function`/`Pattern` requests include a `toy`
+field with the selected ID, or omit it entirely for "All Toys" (per the
+Standard API's own behavior — omitting `toy` targets every connected toy).
+Switching while active stops whatever was running on the old target and
+restarts it on the new one, using the last known intensity and pattern.
+
+Selection isn't persisted on either side — both the watch's index and the
+phone's list reset to "All Toys" on relaunch.
+
+## Basic mode colors
+
+The settings page has three color pickers (a handful of preset swatches
+each, not a full picker) for Basic mode's background, text, and accent
+(pattern label + action bar background). They're sent to the watch as hex
+strings, parsed into `GColor`s, and persisted on-watch with
+`persist_write_int` the same way `ui_style` is — so like the display style,
+they survive app restarts and don't need the phone to resend them (though it
+does anyway on `ready`, in case they were never received the first time).
+
+Discrete mode ignores these entirely — its palette is fixed as part of the
+LCD-classic look.
+
+## Other Lovense API features worth considering
+
+While confirming the Preset/Pattern schemas and building the Events API
+above, a couple of other things in Lovense's public docs stood out:
+
+- **Toy battery level** — already sitting unused in every `GetToys`
+  response and every Events API `battery-changed` event (0–100). Since
+  we're already connected either way, showing the toy's own battery
+  percentage somewhere (as a fourth option alongside steps/heart rate, from
+  our earlier mockups) would cost essentially nothing extra.
+- **`stopPrevious`** — a `Function` request parameter that controls whether
+  a new command stops whatever was previously running. We don't need it now
+  since we only ever send one function at a time, but it'd matter if a toy
+  ever needed multiple simultaneous functions (e.g. vibrate + rotate).
+- **`button-down`/`button-up`/`button-pressed`** — Events API messages for
+  toys that have their own physical buttons (Nora, Max 2, Solace, Mission2).
+  Not useful for controlling vibration, but could be a fun secondary input
+  if a toy's own button should do something in the app.
 
 ## Notes and troubleshooting
 
@@ -118,8 +220,8 @@ watchapp is launched.
   Lovense API and what status code comes back.
 - Pausing sends a `Vibrate:0` command rather than a separate stop command —
   the same mechanism used to start vibration, just at zero — so stopping is
-  exactly as reliable as starting, regardless of toy or firmware quirks. It
-  also clears any running Pulse/Wave timer, so nothing fires after a pause.
+  exactly as reliable as starting, and it overrides a running Pulse loop or
+  Wave pattern the same way it overrides Steady.
 - Game Mode's IP can change if the phone reconnects to Wi-Fi — re-check it in
   the Lovense app if control suddenly stops working.
 - The watchapp sends a full "stop" command when it's closed, so leaving the
@@ -131,10 +233,13 @@ watchapp is launched.
 ## Extending it
 
 Ideas if you want to build on this:
-- Target a specific toy instead of all connected toys by adding a `toy` field
-  (a toy ID from Lovense's `GetToys` command) to the outgoing command body.
-- Persist the selected pattern with `persist_write_int`, the same way
-  `ui_style` is persisted, if you want it to survive app restarts.
+- Support targeting multiple specific toys at once (not just one or all) by
+  sending an array in the `toy` field, per Remote 7.71.0+.
+- Persist the selected pattern and toy with `persist_write_int`/a small
+  on-watch string buffer, the same way `ui_style` and the Basic colors are,
+  if you want them to survive app restarts.
 - Make Discrete mode's row tick with real seconds when paused (so it's
   indistinguishable from a real watchface at rest), only switching to the
   intensity readout while actively vibrating.
+- Add a full color picker (rather than preset swatches) to the settings
+  page, and/or extend customization to Discrete mode's palette.
