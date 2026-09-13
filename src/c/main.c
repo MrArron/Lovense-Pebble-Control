@@ -19,11 +19,28 @@ static void log_heap(const char *label) {
 
 static int s_intensity = 0;
 static bool s_active = false;
+static int s_pattern = 0;
+static const char *PATTERN_NAMES[3] = { "STEADY", "PULSE", "WAVE" };
+
+static const uint32_t HAPTIC_STEADY[] = { 100 };
+static const uint32_t HAPTIC_PULSE[] = { 100, 100, 100 };
+static const uint32_t HAPTIC_WAVE[] = { 100, 100, 100, 100, 100 };
+static const VibePattern HAPTIC_PATTERNS[3] = {
+  { .durations = HAPTIC_STEADY, .num_segments = ARRAY_LENGTH(HAPTIC_STEADY) },
+  { .durations = HAPTIC_PULSE, .num_segments = ARRAY_LENGTH(HAPTIC_PULSE) },
+  { .durations = HAPTIC_WAVE, .num_segments = ARRAY_LENGTH(HAPTIC_WAVE) },
+};
+
+static TextLayer *s_status_layer;
+static TextLayer *s_pattern_layer;
+static TextLayer *s_tip_layer;
 
 static void update_display(void) {
   static char buf[16];
-  snprintf(buf, sizeof(buf), "%d [%s]", s_intensity, s_active ? "ON" : "OFF");
+  snprintf(buf, sizeof(buf), "%d", s_intensity);
   text_layer_set_text(s_text_layer, buf);
+  text_layer_set_text(s_status_layer, s_active ? "VIBRATING" : "PAUSED");
+  text_layer_set_text(s_pattern_layer, PATTERN_NAMES[s_pattern]);
 }
 
 static void send_command_msg(const char *command, int intensity) {
@@ -74,11 +91,15 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void up_long_click_handler(ClickRecognizerRef recognizer, void *context) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] up long-clicked");
+  s_pattern = (s_pattern + 1) % 3;
+  vibes_enqueue_custom_pattern(HAPTIC_PATTERNS[s_pattern]);
+  update_display();
 }
 
 static void down_long_click_handler(ClickRecognizerRef recognizer, void *context) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] down long-clicked");
+  s_pattern = (s_pattern + 2) % 3;
+  vibes_enqueue_custom_pattern(HAPTIC_PATTERNS[s_pattern]);
+  update_display();
 }
 
 static void click_config_provider(void *context) {
@@ -155,10 +176,25 @@ static void window_load(Window *window) {
   s_container = layer_create(bounds);
   layer_add_child(window_layer, s_container);
 
-  s_text_layer = text_layer_create(GRect(0, 72, bounds.size.w - 20, 40));
+  s_text_layer = text_layer_create(GRect(0, 14, bounds.size.w - 20, 54));
   text_layer_set_text_alignment(s_text_layer, GTextAlignmentCenter);
-  text_layer_set_text(s_text_layer, "Hello, Time 2!");
+  text_layer_set_text(s_text_layer, "0");
   layer_add_child(s_container, text_layer_get_layer(s_text_layer));
+
+  s_status_layer = text_layer_create(GRect(0, 68, bounds.size.w - 20, 26));
+  text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
+  text_layer_set_text(s_status_layer, "PAUSED");
+  layer_add_child(s_container, text_layer_get_layer(s_status_layer));
+
+  s_pattern_layer = text_layer_create(GRect(0, 94, bounds.size.w - 20, 22));
+  text_layer_set_text_alignment(s_pattern_layer, GTextAlignmentCenter);
+  text_layer_set_text(s_pattern_layer, "STEADY");
+  layer_add_child(s_container, text_layer_get_layer(s_pattern_layer));
+
+  s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 42, bounds.size.w - 24, 42));
+  text_layer_set_text_alignment(s_tip_layer, GTextAlignmentCenter);
+  text_layer_set_text(s_tip_layer, "Hold UP/DOWN: pattern");
+  layer_add_child(s_container, text_layer_get_layer(s_tip_layer));
 
   s_button_bar_layer = layer_create(GRect(bounds.size.w - 20, 0, 20, bounds.size.h));
   layer_set_update_proc(s_button_bar_layer, button_bar_update_proc);
@@ -169,6 +205,9 @@ static void window_load(Window *window) {
 
 static void window_unload(Window *window) {
   text_layer_destroy(s_text_layer);
+  text_layer_destroy(s_status_layer);
+  text_layer_destroy(s_pattern_layer);
+  text_layer_destroy(s_tip_layer);
   layer_destroy(s_button_bar_layer);
   layer_destroy(s_container);
 }
@@ -208,7 +247,8 @@ static void deferred_setup(void *data) {
   app_message_open(128, 128);
   log_heap("after app_message_open");
 
-  tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
+  // tick_timer_service_subscribe removed for this test - matching the
+  // reduced real app, which no longer needs it without Discrete mode.
   log_heap("deferred_setup end");
 }
 
@@ -229,7 +269,6 @@ static void init(void) {
 }
 
 static void deinit(void) {
-  tick_timer_service_unsubscribe();
   window_destroy(s_window);
 }
 
