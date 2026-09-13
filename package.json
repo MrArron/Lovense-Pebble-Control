@@ -6,7 +6,7 @@
   "private": true,
   "dependencies": {},
   "pebble": {
-    "displayName": "Lovense Remote",
+    "displayName": "Lovense Remote (slim test)",
     "uuid": "a1c07ca2-af75-41b3-ac3d-e86d4b6ad355",
     "sdkVersion": "3",
     "targetPlatforms": [
@@ -22,22 +22,12 @@
     "messageKeys": [
       "command",
       "intensity",
-      "ui_style",
-      "pattern",
-      "toy_connected",
-      "toy_name",
       "basic_bg_color",
       "basic_text_color",
-      "basic_accent_color",
-      "discrete_bezel_color",
-      "discrete_bg_color",
-      "discrete_text_color"
+      "basic_accent_color"
     ],
     "resources": {
       "media": []
-    },
-    "capabilities": [
-      "configurable"
-    ]
+    }
   }
 }
