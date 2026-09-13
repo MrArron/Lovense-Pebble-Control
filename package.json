@@ -19,7 +19,7 @@
     "watchapp": {
       "watchface": false
     },
-    "messageKeys": [],
+    "messageKeys": ["command", "intensity"],
     "resources": {
       "media": []
     }

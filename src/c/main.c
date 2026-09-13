@@ -17,16 +17,60 @@ static void log_heap(const char *label) {
           label, (int)heap_bytes_free(), (int)heap_bytes_used());
 }
 
+static int s_intensity = 0;
+static bool s_active = false;
+
+static void update_display(void) {
+  static char buf[16];
+  snprintf(buf, sizeof(buf), "%d [%s]", s_intensity, s_active ? "ON" : "OFF");
+  text_layer_set_text(s_text_layer, buf);
+}
+
+static void send_command_msg(const char *command, int intensity) {
+  DictionaryIterator *iter;
+  AppMessageResult result = app_message_outbox_begin(&iter);
+  if (result != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "outbox_begin failed: %d", (int)result);
+    return;
+  }
+  dict_write_cstring(iter, MESSAGE_KEY_command, command);
+  dict_write_int32(iter, MESSAGE_KEY_intensity, intensity);
+  result = app_message_outbox_send();
+  if (result != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "outbox_send failed: %d", (int)result);
+  }
+}
+
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] up clicked");
+  s_intensity += 2;
+  if (s_intensity > 20) {
+    s_intensity = 20;
+  }
+  update_display();
+  if (s_active) {
+    send_command_msg("vibrate", s_intensity);
+  } else {
+    send_command_msg("ping", s_intensity);
+  }
 }
 
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] down clicked");
+  s_intensity -= 2;
+  if (s_intensity < 0) {
+    s_intensity = 0;
+  }
+  update_display();
+  if (s_active) {
+    send_command_msg("vibrate", s_intensity);
+  } else {
+    send_command_msg("ping", s_intensity);
+  }
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
-  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] select clicked");
+  s_active = !s_active;
+  update_display();
+  send_command_msg(s_active ? "vibrate" : "pause", s_intensity);
 }
 
 static void click_config_provider(void *context) {
