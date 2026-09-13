@@ -1,13 +1,13 @@
 {
-  "name": "lovense-remote",
+  "name": "minimal-test",
   "author": "you",
   "version": "1.0.0",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
   "pebble": {
-    "displayName": "Lovense Remote (slim test)",
-    "uuid": "a1c07ca2-af75-41b3-ac3d-e86d4b6ad355",
+    "displayName": "Minimal Test",
+    "uuid": "b2d1c3d4-5e6f-4a1b-8c2d-9e0f1a2b3c99",
     "sdkVersion": "3",
     "targetPlatforms": [
       "aplite",
@@ -19,13 +19,7 @@
     "watchapp": {
       "watchface": false
     },
-    "messageKeys": [
-      "command",
-      "intensity",
-      "basic_bg_color",
-      "basic_text_color",
-      "basic_accent_color"
-    ],
+    "messageKeys": [],
     "resources": {
       "media": []
     }
