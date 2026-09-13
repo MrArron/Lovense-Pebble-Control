@@ -13,7 +13,9 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 - `src/c/main.c` — watchapp UI. UP/DOWN adjust intensity (0–20, steps of 2)
   and, held, cycle patterns. SELECT pauses/resumes at the current level.
-  Basic mode has an on-screen action bar; Discrete mode has none.
+  **Basic mode's action bar is currently disabled** (`ENABLE_ACTION_BAR 0` at
+  the top of the file) while a startup crash on Emery gets isolated — see
+  "Known issue" below.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
   Lovense Standard API calls (`POST /command`), including native Pulse/Wave
   pattern parameters and toy-connection polling, and provides a small
@@ -89,25 +91,30 @@ All commands target whichever toy (or "All Toys") is currently selected.
 ### Display styles
 
 - **Basic** — a big number for the current intensity, a "VIBRATING"/"PAUSED"
-  label, the current pattern name, and an on-screen action bar (chevrons for
-  UP/DOWN, a pause/play icon for SELECT that swaps depending on state) with a
-  tooltip beneath explaining the hold gestures. Background, text, and accent
+  label, the current pattern name, and (normally) an on-screen action bar
+  with a tooltip beneath explaining the hold gestures — see "Known issue"
+  below for its current disabled state. Background, text, and accent
   (pattern label + action bar) colors are all customizable from the phone's
   settings page.
 - **Discrete** — disguised as an ordinary minimalist digital watchface,
-  styled after classic LCD watch faces: a pale background inside a red
-  bezel, a day-of-week row with today highlighted, and small
+  styled after classic LCD watch faces: a bezel-colored border around a
+  plain background, a day-of-week row with today highlighted, and small
   battery-percentage and toy-connection glyphs in the bottom corners, plus a
   date row. Time and the disguised intensity share a single row formatted
   like a real `HH:MM:SS` readout (e.g. `20:49:12`, where `12` is the
   intensity, not real seconds). The only sign of active/paused state is that
-  row's color (black when paused, red when vibrating). The current pattern
-  isn't shown anywhere in this mode by design; instead, cycling patterns
-  gives a distinct number of short wrist buzzes (1 for Steady, 2 for Pulse,
-  3 for Wave) — a haptic tap looks like completely ordinary watch feedback,
-  so it doesn't compromise the disguise. Holding SELECT to change toy is the
-  one exception to "nothing shows on screen": the selected toy's name
-  appears under the date for 5 seconds, then disappears on its own.
+  row's color (customizable "text" color when paused, fixed red when
+  vibrating). The current pattern isn't shown anywhere in this mode by
+  design; instead, cycling patterns gives a distinct number of short wrist
+  buzzes (1 for Steady, 2 for Pulse, 3 for Wave) — a haptic tap looks like
+  completely ordinary watch feedback, so it doesn't compromise the disguise.
+  Holding SELECT to change toy is the one exception to "nothing shows on
+  screen": the selected toy's name appears under the date for 5 seconds,
+  then disappears on its own. Bezel, background, and text colors are all
+  customizable from the phone's settings page (see below); the red
+  active/vibrating signal and the muted secondary tone (date, unselected
+  weekday letters, disconnected-toy glyph color) are fixed, since they're
+  part of how the disguise actually communicates state.
 
 ## Patterns
 
@@ -137,7 +144,7 @@ watchapp is launched.
 The Discrete face's bottom-left glyph (labeled "BT") shows whether the
 Lovense toy itself is still connected to the phone — not the watch's own
 Bluetooth link to the phone, which is a separate, less useful signal. It's
-muted when connected, and switches to the bezel's red when not.
+muted when connected, and switches to the bezel color when not.
 
 The primary source is the **Toy Events API** — a WebSocket connection
 (`ws://{ip}:{port}/v1`) that pushes `toy-list` and `toy-status` events the
@@ -179,18 +186,43 @@ restarts it on the new one, using the last known intensity and pattern.
 Selection isn't persisted on either side — both the watch's index and the
 phone's list reset to "All Toys" on relaunch.
 
-## Basic mode colors
+## Basic and Discrete mode colors
 
-The settings page has three color pickers (a handful of preset swatches
-each, not a full picker) for Basic mode's background, text, and accent
-(pattern label + action bar background). They're sent to the watch as hex
-strings, parsed into `GColor`s, and persisted on-watch with
-`persist_write_int` the same way `ui_style` is — so like the display style,
+The settings page has color pickers (a handful of preset swatches each, not
+a full picker) for:
+
+- **Basic mode**: background, text, and accent (pattern label + action bar
+  background).
+- **Discrete mode**: bezel, background, and text (the last applies to the
+  time row when paused, today's highlighted weekday letter, and the toy-name
+  reveal).
+
+All six are sent to the watch as hex strings, parsed into `GColor`s, and
+persisted on-watch with `persist_write_int` the same way `ui_style` is — so
 they survive app restarts and don't need the phone to resend them (though it
 does anyway on `ready`, in case they were never received the first time).
 
-Discrete mode ignores these entirely — its palette is fixed as part of the
-LCD-classic look.
+Discrete mode's red active/vibrating signal and its muted secondary tone
+(date, unselected weekday letters) are intentionally not customizable —
+changing those would blur the one visual cue the disguise actually relies on
+to communicate state.
+
+## Known issue: Basic mode's action bar is disabled
+
+Basic mode crashed immediately on open on a Pebble Time 2 (Emery), with a
+fault whose `LR` pointed into RAM rather than flash — a pattern usually
+caused by a stack overflow or a call through a bad function pointer. As a
+bisection step, the whole action bar subsystem (the four PNG icons and their
+`ActionBarLayer`) is gated behind `#define ENABLE_ACTION_BAR 0` at the top of
+`main.c`. With it at `0`, Basic mode falls back to a plain
+`window_set_click_config_provider` call and has no on-screen button icons or
+hints beyond the tip text.
+
+If you flip it back to `1` and it crashes again in the same way, the action
+bar/icons are cleared as suspects and the next thing to check is the
+`GColor8`/`.argb` color-parsing code (`parse_hex_color`,
+`packed_from_hex`/`color_from_packed`) added around the same time, since
+that's new, untested-on-real-hardware code too.
 
 ## Other Lovense API features worth considering
 
@@ -241,5 +273,5 @@ Ideas if you want to build on this:
 - Make Discrete mode's row tick with real seconds when paused (so it's
   indistinguishable from a real watchface at rest), only switching to the
   intensity readout while actively vibrating.
-- Add a full color picker (rather than preset swatches) to the settings
-  page, and/or extend customization to Discrete mode's palette.
+- Add a full color picker (rather than preset swatches) to the settings page
+  for either mode's colors.

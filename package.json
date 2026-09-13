@@ -28,7 +28,10 @@
       "toy_name",
       "basic_bg_color",
       "basic_text_color",
-      "basic_accent_color"
+      "basic_accent_color",
+      "discrete_bezel_color",
+      "discrete_bg_color",
+      "discrete_text_color"
     ],
     "resources": {
       "media": [

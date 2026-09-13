@@ -18,6 +18,9 @@
 #define PERSIST_KEY_BASIC_BG 2
 #define PERSIST_KEY_BASIC_TEXT 3
 #define PERSIST_KEY_BASIC_ACCENT 4
+#define PERSIST_KEY_DISCRETE_BEZEL 5
+#define PERSIST_KEY_DISCRETE_BG 6
+#define PERSIST_KEY_DISCRETE_TEXT 7
 
 #define TIP_DEFAULT_TEXT "Hold UP/DOWN\nto change pattern\nHold SELECT: toy"
 
@@ -79,24 +82,25 @@ static AppTimer *s_toy_display_timer = NULL;
 static GColor s_basic_bg_color;
 static GColor s_basic_text_color;
 static GColor s_basic_accent_color;
+static GColor s_discrete_bezel_color;
+static GColor s_discrete_bg_color;
+static GColor s_discrete_text_color;
 
-static const GColor COLOR_TIME_ACTIVE = GColorRed;
-static const GColor COLOR_TIME_PAUSED = GColorBlack;
-static const GColor COLOR_LCD_BG = GColorPastelYellow;         // pale LCD tint
-static const GColor COLOR_LCD_BORDER = GColorDarkCandyAppleRed; // red bezel
-static const GColor COLOR_LCD_MUTED = GColorArmyGreen;          // muted day letters
+static const GColor COLOR_TIME_ACTIVE = GColorRed; // fixed - this is the disguise's state signal
+static const GColor COLOR_LCD_MUTED = GColorArmyGreen; // fixed - secondary/muted elements only
 
 static const char *WEEKDAY_LETTERS[7] = { "S", "M", "T", "W", "T", "F", "S" };
 
 static void frame_update_proc(Layer *layer, GContext *ctx) {
-  // Draws the pale LCD fill and red bezel as one opaque layer, so it
-  // doubles as the background for everything else in Discrete mode.
+  // Draws the LCD fill and bezel as one opaque layer, so it doubles as the
+  // background for everything else in Discrete mode. Both colors come from
+  // the phone's settings page.
   GRect bounds = layer_get_bounds(layer);
-  graphics_context_set_fill_color(ctx, COLOR_LCD_BORDER);
+  graphics_context_set_fill_color(ctx, s_discrete_bezel_color);
   graphics_fill_rect(ctx, bounds, 16, GCornersAll);
   GRect inner = GRect(bounds.origin.x + 4, bounds.origin.y + 4,
                        bounds.size.w - 8, bounds.size.h - 8);
-  graphics_context_set_fill_color(ctx, COLOR_LCD_BG);
+  graphics_context_set_fill_color(ctx, s_discrete_bg_color);
   graphics_fill_rect(ctx, inner, 13, GCornersAll);
 }
 
@@ -116,13 +120,13 @@ static void update_toy_connection_glyph(void) {
   // connected to the phone (reported by index.js), not the watch's own
   // Bluetooth link - that's a separate, less actionable piece of state.
   text_layer_set_text(s_bt_layer, "BT");
-  text_layer_set_text_color(s_bt_layer, s_toy_connected ? COLOR_LCD_MUTED : COLOR_LCD_BORDER);
+  text_layer_set_text_color(s_bt_layer, s_toy_connected ? COLOR_LCD_MUTED : s_discrete_bezel_color);
 }
 
 static void update_day_row(struct tm *tick_time) {
   for (int i = 0; i < 7; i++) {
     bool is_today = (i == tick_time->tm_wday);
-    text_layer_set_text_color(s_day_layers[i], is_today ? GColorBlack : COLOR_LCD_MUTED);
+    text_layer_set_text_color(s_day_layers[i], is_today ? s_discrete_text_color : COLOR_LCD_MUTED);
   }
 }
 
@@ -213,6 +217,14 @@ static void apply_basic_colors(void) {
 #endif
 }
 
+static void update_discrete_display(void);
+
+static void apply_discrete_colors(void) {
+  text_layer_set_text_color(s_toy_layer, s_discrete_text_color);
+  layer_mark_dirty(s_frame_layer); // repaint the bezel/background immediately
+  update_discrete_display(); // re-applies text color for the current active/paused state
+}
+
 static void update_basic_display(void) {
   static char intensity_buf[16];
   snprintf(intensity_buf, sizeof(intensity_buf), "%d", s_intensity);
@@ -224,9 +236,8 @@ static void update_basic_display(void) {
 #endif
 }
 
-
 static void update_discrete_display(void) {
-  text_layer_set_text_color(s_time_layer, s_active ? COLOR_TIME_ACTIVE : COLOR_TIME_PAUSED);
+  text_layer_set_text_color(s_time_layer, s_active ? COLOR_TIME_ACTIVE : s_discrete_text_color);
 }
 
 static void update_display(void) {
@@ -382,6 +393,27 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     apply_basic_colors();
   }
 
+  Tuple *discrete_bezel_tuple = dict_find(iterator, MESSAGE_KEY_discrete_bezel_color);
+  if (discrete_bezel_tuple) {
+    s_discrete_bezel_color = parse_hex_color(discrete_bezel_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_DISCRETE_BEZEL, (int)packed_from_hex(discrete_bezel_tuple->value->cstring));
+    apply_discrete_colors();
+  }
+
+  Tuple *discrete_bg_tuple = dict_find(iterator, MESSAGE_KEY_discrete_bg_color);
+  if (discrete_bg_tuple) {
+    s_discrete_bg_color = parse_hex_color(discrete_bg_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_DISCRETE_BG, (int)packed_from_hex(discrete_bg_tuple->value->cstring));
+    apply_discrete_colors();
+  }
+
+  Tuple *discrete_text_tuple = dict_find(iterator, MESSAGE_KEY_discrete_text_color);
+  if (discrete_text_tuple) {
+    s_discrete_text_color = parse_hex_color(discrete_text_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_DISCRETE_TEXT, (int)packed_from_hex(discrete_text_tuple->value->cstring));
+    apply_discrete_colors();
+  }
+
   Tuple *command_tuple = dict_find(iterator, MESSAGE_KEY_command);
   if (command_tuple) {
     APP_LOG(APP_LOG_LEVEL_DEBUG, "Ack from phone: %s", command_tuple->value->cstring);
@@ -481,7 +513,7 @@ static void window_load(Window *window) {
 
   s_time_layer = text_layer_create(GRect(0, center_y - 40, bounds.size.w, 50));
   text_layer_set_background_color(s_time_layer, GColorClear);
-  text_layer_set_text_color(s_time_layer, COLOR_TIME_PAUSED);
+  text_layer_set_text_color(s_time_layer, s_discrete_text_color);
   text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS));
   text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
   text_layer_set_text(s_time_layer, "--:--:--");
@@ -497,7 +529,7 @@ static void window_load(Window *window) {
 
   s_toy_layer = text_layer_create(GRect(0, center_y + 36, bounds.size.w, 18));
   text_layer_set_background_color(s_toy_layer, GColorClear);
-  text_layer_set_text_color(s_toy_layer, GColorBlack);
+  text_layer_set_text_color(s_toy_layer, s_discrete_text_color);
   text_layer_set_font(s_toy_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_toy_layer, GTextAlignmentCenter);
   text_layer_set_text(s_toy_layer, "");
@@ -558,6 +590,16 @@ static void init(void) {
   s_basic_accent_color = persist_exists(PERSIST_KEY_BASIC_ACCENT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_ACCENT))
     : parse_hex_color("#e0245e");
+
+  s_discrete_bezel_color = persist_exists(PERSIST_KEY_DISCRETE_BEZEL)
+    ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_BEZEL))
+    : GColorDarkCandyAppleRed;
+  s_discrete_bg_color = persist_exists(PERSIST_KEY_DISCRETE_BG)
+    ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_BG))
+    : GColorPastelYellow;
+  s_discrete_text_color = persist_exists(PERSIST_KEY_DISCRETE_TEXT)
+    ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_TEXT))
+    : GColorBlack;
 
   s_window = window_create();
   window_set_window_handlers(s_window, (WindowHandlers) {

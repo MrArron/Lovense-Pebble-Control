@@ -362,13 +362,25 @@ function sendBasicColorsToWatch() {
   });
 }
 
+function sendDiscreteColorsToWatch() {
+  Pebble.sendAppMessage({
+    discrete_bezel_color: getSetting('discreteColorBezel', '#7a1f1f'),
+    discrete_bg_color: getSetting('discreteColorBg', '#f5e9a8'),
+    discrete_text_color: getSetting('discreteColorText', '#000000')
+  }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send Discrete mode colors to watch.');
+  });
+}
+
 Pebble.addEventListener('ready', function () {
   console.log('Lovense Remote companion ready.');
-  // Re-sync the watch's UI style and Basic mode colors on launch, in case
-  // they were never pushed down before (e.g. after reinstalling the
-  // watchapp).
+  // Re-sync the watch's UI style and colors on launch, in case they were
+  // never pushed down before (e.g. after reinstalling the watchapp).
   sendUiStyleToWatch(getSetting('lovenseUiStyle', 'basic'));
   sendBasicColorsToWatch();
+  sendDiscreteColorsToWatch();
   checkToyConnection(); // immediate baseline before the socket handshake completes
   connectToyEvents();
 });
@@ -423,9 +435,17 @@ Pebble.addEventListener('showConfiguration', function () {
   var basicText = getSetting('basicColorText', '#000000');
   var basicAccent = getSetting('basicColorAccent', '#e0245e');
 
+  var discreteBezel = getSetting('discreteColorBezel', '#7a1f1f');
+  var discreteBg = getSetting('discreteColorBg', '#f5e9a8');
+  var discreteText = getSetting('discreteColorText', '#000000');
+
   var BG_SWATCHES = ['#ffffff', '#111111', '#e8eef5', '#0f1f18'];
   var TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0'];
   var ACCENT_SWATCHES = ['#e0245e', '#1d4e89', '#2e6b4f', '#5a3d7a'];
+
+  var BEZEL_SWATCHES = ['#7a1f1f', '#1d4e89', '#2e6b4f', '#5a3d7a', '#333333'];
+  var DISCRETE_BG_SWATCHES = ['#f5e9a8', '#e8eef5', '#111111', '#ffffff'];
+  var DISCRETE_TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0'];
 
   function swatchRow(name, options, current) {
     var html = '<div class="swatch-row" data-target="' + name + '">';
@@ -468,6 +488,12 @@ Pebble.addEventListener('showConfiguration', function () {
     '<label>Text</label>' + swatchRow('basicColorText', TEXT_SWATCHES, basicText) +
     '<label>Accent (pattern label, action bar)</label>' + swatchRow('basicColorAccent', ACCENT_SWATCHES, basicAccent) +
     '</div>' +
+    '<div style="border-top:0.5px solid #333;margin-top:16px;padding-top:12px;">' +
+    '<p style="color:#fff;font-size:15px;font-weight:500;margin:0 0 4px;">Discrete mode colors</p>' +
+    '<label>Bezel</label>' + swatchRow('discreteColorBezel', BEZEL_SWATCHES, discreteBezel) +
+    '<label>Background</label>' + swatchRow('discreteColorBg', DISCRETE_BG_SWATCHES, discreteBg) +
+    '<label>Text</label>' + swatchRow('discreteColorText', DISCRETE_TEXT_SWATCHES, discreteText) +
+    '</div>' +
     '<button onclick="save()">Save</button>' +
     '<script>' +
     'function pickColor(el){' +
@@ -488,7 +514,10 @@ Pebble.addEventListener('showConfiguration', function () {
     'uiStyle:uiStyle,' +
     'basicColorBg:document.getElementById("basicColorBg").value,' +
     'basicColorText:document.getElementById("basicColorText").value,' +
-    'basicColorAccent:document.getElementById("basicColorAccent").value' +
+    'basicColorAccent:document.getElementById("basicColorAccent").value,' +
+    'discreteColorBezel:document.getElementById("discreteColorBezel").value,' +
+    'discreteColorBg:document.getElementById("discreteColorBg").value,' +
+    'discreteColorText:document.getElementById("discreteColorText").value' +
     '};' +
     'document.location="pebblejs://close#"+encodeURIComponent(JSON.stringify(result));' +
     '}</script></body></html>';
@@ -529,6 +558,19 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.basicColorBg !== undefined || settings.basicColorText !== undefined ||
         settings.basicColorAccent !== undefined) {
       sendBasicColorsToWatch();
+    }
+    if (settings.discreteColorBezel !== undefined) {
+      localStorage.setItem('discreteColorBezel', settings.discreteColorBezel);
+    }
+    if (settings.discreteColorBg !== undefined) {
+      localStorage.setItem('discreteColorBg', settings.discreteColorBg);
+    }
+    if (settings.discreteColorText !== undefined) {
+      localStorage.setItem('discreteColorText', settings.discreteColorText);
+    }
+    if (settings.discreteColorBezel !== undefined || settings.discreteColorBg !== undefined ||
+        settings.discreteColorText !== undefined) {
+      sendDiscreteColorsToWatch();
     }
     console.log('Saved Lovense settings: ' + JSON.stringify(settings));
   } catch (err) {
