@@ -474,13 +474,31 @@ Pebble.addEventListener('showConfiguration', function () {
   var discreteBg = getSetting('discreteColorBg', '#f5e9a8');
   var discreteText = getSetting('discreteColorText', '#000000');
 
-  var BG_SWATCHES = ['#ffffff', '#111111', '#e8eef5', '#0f1f18'];
-  var TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0'];
-  var ACCENT_SWATCHES = ['#e0245e', '#1d4e89', '#2e6b4f', '#5a3d7a'];
+  // Each preset sets all six color fields together. basicAccent mirrors the
+  // Discrete bezel and basicBg/basicText mirror Discrete's background/text,
+  // so a preset gives one consistent look across both display styles.
+  var PRESETS = [
+    { name: 'Lovense pink', bezel: '#e4007c', bg: '#ffffff', text: '#000000' },
+    { name: 'Classic', bezel: '#7a1f1f', bg: '#f5e9a8', text: '#000000' },
+    { name: 'Midnight', bezel: '#16324f', bg: '#e8eef5', text: '#132a44' },
+    { name: 'Forest', bezel: '#1f4d3a', bg: '#0f1f18', text: '#7be8b0' },
+    { name: 'Plum', bezel: '#4a1942', bg: '#111111', text: '#ffffff' },
+    { name: 'Teal', bezel: '#0f4a4a', bg: '#ffffff', text: '#000000' },
+    { name: 'Rust', bezel: '#7a3010', bg: '#f5ecd8', text: '#333333' },
+    { name: 'Amber', bezel: '#8a5a12', bg: '#fff8e6', text: '#5a3d0a' },
+    { name: 'Slate', bezel: '#3d4a52', bg: '#e8edf0', text: '#1f2a30' },
+    { name: 'Crimson', bezel: '#c41e3a', bg: '#fff0f0', text: '#6b0f1a' },
+    { name: 'Violet', bezel: '#6d4aa0', bg: '#f3edfa', text: '#3a2560' },
+    { name: 'Ocean', bezel: '#1a6fa0', bg: '#e6f4fa', text: '#0a3a52' }
+  ];
 
-  var BEZEL_SWATCHES = ['#7a1f1f', '#1d4e89', '#2e6b4f', '#5a3d7a', '#333333'];
-  var DISCRETE_BG_SWATCHES = ['#f5e9a8', '#e8eef5', '#111111', '#ffffff'];
-  var DISCRETE_TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0'];
+  var BG_SWATCHES = ['#ffffff', '#111111', '#f5ecd8', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
+  var TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0', '#333333', '#c9a227'];
+  var ACCENT_SWATCHES = ['#e0245e', '#1d4e89', '#2e6b4f', '#5a3d7a', '#1a7a6e', '#c9691a', '#e4007c'];
+
+  var BEZEL_SWATCHES = ['#7a1f1f', '#1d4e89', '#2e6b4f', '#5a3d7a', '#333333', '#1a5f5f', '#e4007c'];
+  var DISCRETE_BG_SWATCHES = ['#f5e9a8', '#ffffff', '#111111', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
+  var DISCRETE_TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0', '#7a1f1f', '#c9a227'];
 
   function swatchRow(name, options, current) {
     var html = '<div class="swatch-row" data-target="' + name + '">';
@@ -493,44 +511,129 @@ Pebble.addEventListener('showConfiguration', function () {
     return html;
   }
 
+  function presetTile(index, preset) {
+    return '<div class="preset-tile" onclick="applyPreset(' + index + ')">' +
+      '<div class="preset-swatch" style="background:' + preset.bezel + '">' +
+      '<div class="preset-inner" style="background:' + preset.bg + ';color:' + preset.text + '">20:49</div>' +
+      '</div><span>' + preset.name + '</span></div>';
+  }
+
+  var presetsHtml = PRESETS.map(function (p, i) { return presetTile(i, p); }).join('');
+
   var html = '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<style>body{font-family:sans-serif;padding:16px;background:#111;color:#eee}' +
+    '<style>' +
+    '*{box-sizing:border-box}' +
+    'html,body{height:100%;margin:0}' +
+    'body{font-family:sans-serif;background:#111;color:#eee;display:flex;flex-direction:column}' +
+    '.header{padding:16px 18px 12px;border-bottom:0.5px solid #292929;flex-shrink:0}' +
+    '.header h3{margin:0;font-size:17px}' +
+    '.content{padding:16px 18px;flex:1;overflow-y:auto;min-height:0}' +
+    '.footer{padding:14px 18px;border-top:0.5px solid #292929;flex-shrink:0}' +
     'label{display:block;margin-top:12px;font-size:14px}' +
-    'input[type=text]{width:100%;box-sizing:border-box;padding:8px;margin-top:4px;font-size:16px}' +
+    'input[type=text]{width:100%;padding:8px;margin-top:4px;font-size:16px;background:#1c1c1e;border:none;border-radius:8px;color:#eee}' +
     '.radio-row{display:flex;align-items:center;margin-top:8px;font-size:15px}' +
     '.radio-row input{width:auto;margin-right:10px}' +
-    '.swatch-row{display:flex;gap:10px;margin-top:6px}' +
-    '.swatch{width:28px;height:28px;border-radius:50%;border:2px solid transparent;box-sizing:border-box}' +
-    '.swatch.selected{border-color:#fff}' +
-    'button{margin-top:20px;width:100%;padding:12px;font-size:16px;background:#e0245e;color:#fff;border:none;border-radius:4px}' +
-    'p{font-size:12px;color:#aaa}</style></head><body>' +
-    '<h3>Lovense Remote Settings</h3>' +
-    '<p>Enable <b>Game Mode</b> in the Lovense Remote app (Discover &gt; Game Mode) ' +
+    '.swatch-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}' +
+    '.swatch{width:26px;height:26px;border-radius:50%;border:2px solid transparent;flex-shrink:0}' +
+    '.swatch.selected{border-color:#fff;box-shadow:0 0 0 2px #111}' +
+    '.card{background:#1c1c1e;border-radius:14px;padding:16px;margin-top:16px}' +
+    '.card p.title{color:#fff;font-size:14px;font-weight:600;margin:0 0 12px}' +
+    'button.save{width:100%;padding:13px;background:#e0245e;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600}' +
+    '.tabs{display:flex;background:#1c1c1e;border-radius:10px;padding:3px;margin-top:16px}' +
+    '.tab{flex:1;text-align:center;padding:8px 0;border-radius:8px;font-size:13px;font-weight:600;color:#999}' +
+    '.tab.active{background:#e0245e;color:#fff}' +
+    '.preset-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px}' +
+    '.preset-tile{text-align:center;cursor:pointer}' +
+    '.preset-swatch{width:100%;aspect-ratio:1;border-radius:10px;padding:4px}' +
+    '.preset-inner{width:100%;height:100%;border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:9px;font-weight:700}' +
+    '.preset-tile span{font-size:10px;color:#eee}' +
+    'p.hint{font-size:12px;color:#aaa}' +
+    '.disclaimer{border-top:0.5px solid #292929;margin-top:20px;padding-top:14px}' +
+    '.disclaimer p{font-size:11px;line-height:1.5;color:#777;margin:0 0 8px}' +
+    '.disclaimer a{color:#e0245e}' +
+    '</style></head><body>' +
+
+    '<div class="header"><h3>Lovense Remote Settings</h3></div>' +
+
+    '<div class="content">' +
+
+    '<p class="hint">Enable <b>Game Mode</b> in the Lovense Remote app (Discover &gt; Game Mode) ' +
     'and enter the local IP address it shows. Both the phone running Lovense Remote ' +
     'and the phone paired to your Pebble need to be on the same Wi-Fi network ' +
     '(they can be the same phone).</p>' +
     '<label>Lovense Remote IP address<input id="host" type="text" placeholder="192.168.1.100" value="' +
     decodeURIComponent(host) + '"></label>' +
     '<label>Port<input id="port" type="text" value="' + decodeURIComponent(port) + '"></label>' +
-    '<label>Watch display style</label>' +
+
+    '<label style="margin-top:20px">Watch display style</label>' +
     '<div class="radio-row"><input type="radio" name="uiStyle" id="style-basic" value="basic" ' + basicChecked + '>' +
     '<label for="style-basic" style="display:inline;margin:0">Basic — shows level and pause/resume status</label></div>' +
     '<div class="radio-row"><input type="radio" name="uiStyle" id="style-discrete" value="discrete" ' + discreteChecked + '>' +
     '<label for="style-discrete" style="display:inline;margin:0">Discrete — looks like an ordinary watchface</label></div>' +
-    '<div style="border-top:0.5px solid #333;margin-top:16px;padding-top:12px;">' +
-    '<p style="color:#fff;font-size:15px;font-weight:500;margin:0 0 4px;">Basic mode colors</p>' +
+
+    '<div class="tabs">' +
+    '<div class="tab active" id="tab-presets" onclick="showTab(\'presets\')">Presets</div>' +
+    '<div class="tab" id="tab-custom" onclick="showTab(\'custom\')">Custom</div>' +
+    '</div>' +
+
+    '<div id="panel-presets">' +
+    '<div class="preset-grid">' + presetsHtml + '</div>' +
+    '<p class="hint">Each preset sets bezel, background, text, and accent together for both display styles. Switch to Custom to fine-tune anything individually.</p>' +
+    '</div>' +
+
+    '<div id="panel-custom" style="display:none">' +
+    '<div class="card">' +
+    '<p class="title">Basic mode colors</p>' +
     '<label>Background</label>' + swatchRow('basicColorBg', BG_SWATCHES, basicBg) +
     '<label>Text</label>' + swatchRow('basicColorText', TEXT_SWATCHES, basicText) +
-    '<label>Accent (pattern label, action bar)</label>' + swatchRow('basicColorAccent', ACCENT_SWATCHES, basicAccent) +
+    '<label>Accent (pattern label, button bar)</label>' + swatchRow('basicColorAccent', ACCENT_SWATCHES, basicAccent) +
     '</div>' +
-    '<div style="border-top:0.5px solid #333;margin-top:16px;padding-top:12px;">' +
-    '<p style="color:#fff;font-size:15px;font-weight:500;margin:0 0 4px;">Discrete mode colors</p>' +
+    '<div class="card">' +
+    '<p class="title">Discrete mode colors</p>' +
     '<label>Bezel</label>' + swatchRow('discreteColorBezel', BEZEL_SWATCHES, discreteBezel) +
     '<label>Background</label>' + swatchRow('discreteColorBg', DISCRETE_BG_SWATCHES, discreteBg) +
     '<label>Text</label>' + swatchRow('discreteColorText', DISCRETE_TEXT_SWATCHES, discreteText) +
     '</div>' +
-    '<button onclick="save()">Save</button>' +
+    '</div>' +
+
+    '<div class="disclaimer">' +
+    '<p>This app is created independently by its developer and is not affiliated with, endorsed by, or sponsored by Lovense or Pebble/Core Devices/Rebble.</p>' +
+    '<p>Built with the assistance of Claude (Claude Sonnet 5, Anthropic).</p>' +
+    '<p>It\'s open source. <a href="https://github.com/MrArron/Lovense-Pebble-Control">View the code on GitHub</a></p>' +
+    '</div>' +
+
+    '</div>' +
+
+    '<div class="footer"><button class="save" onclick="save()">Save</button></div>' +
+
     '<script>' +
+    'var PRESETS = ' + JSON.stringify(PRESETS) + ';' +
+    'function showTab(name){' +
+    'document.getElementById("panel-presets").style.display = name==="presets" ? "" : "none";' +
+    'document.getElementById("panel-custom").style.display = name==="custom" ? "" : "none";' +
+    'document.getElementById("tab-presets").className = "tab" + (name==="presets" ? " active" : "");' +
+    'document.getElementById("tab-custom").className = "tab" + (name==="custom" ? " active" : "");' +
+    '}' +
+    'function setField(id, value){' +
+    'document.getElementById(id).value = value;' +
+    'var row = document.querySelector(\'.swatch-row[data-target="\'+id+\'"]\');' +
+    'if(!row) return;' +
+    'var swatches = row.getElementsByClassName("swatch");' +
+    'for(var i=0;i<swatches.length;i++){' +
+    'swatches[i].className = swatches[i].getAttribute("data-color").toLowerCase()===value.toLowerCase() ? "swatch selected" : "swatch";' +
+    '}' +
+    '}' +
+    'function applyPreset(index){' +
+    'var p = PRESETS[index];' +
+    'setField("basicColorBg", p.bg);' +
+    'setField("basicColorText", p.text);' +
+    'setField("basicColorAccent", p.bezel);' +
+    'setField("discreteColorBezel", p.bezel);' +
+    'setField("discreteColorBg", p.bg);' +
+    'setField("discreteColorText", p.text);' +
+    'var tiles = document.getElementsByClassName("preset-tile");' +
+    'for(var i=0;i<tiles.length;i++){tiles[i].style.opacity = (i===index) ? "1" : "0.55";}' +
+    '}' +
     'function pickColor(el){' +
     'var row=el.parentNode;' +
     'var swatches=row.getElementsByClassName("swatch");' +

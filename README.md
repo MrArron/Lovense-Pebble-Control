@@ -13,16 +13,19 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 - `src/c/main.c` — watchapp UI. UP/DOWN adjust intensity (0–20, steps of 2)
   and, held, cycle patterns. SELECT pauses/resumes at the current level.
-  Rewritten this round for memory (see "Memory optimizations" below) — only
-  the currently-active display style's layers exist in memory at any time,
-  Basic mode's button bar is hand-drawn instead of loaded from image
-  resources, and `heap_bytes_free()`/`heap_bytes_used()` are logged at every
-  major lifecycle point to help track down the ongoing Emery crash.
+  Only the currently-active display style's layers exist in memory at any
+  time; Basic mode's button bar is hand-drawn instead of loaded from image
+  resources; `heap_bytes_free()`/`heap_bytes_used()` are still logged at
+  every major lifecycle point (kept in place through active development).
+  Includes Discrete's 10s idle-revert-to-real-seconds, Basic's matching idle
+  hint, the round-display (Chalk) layout variant, and the edge-to-edge bezel
+  fix — see their own sections below.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
   Lovense Standard API calls (`POST /command`), including native Pulse/Wave
-  pattern parameters and toy-connection polling, and provides a small
-  settings page for entering the Lovense app's IP/port. Commands target
-  every toy currently connected to Lovense Remote.
+  pattern parameters and toy-connection polling, and provides the settings
+  page (connection info, display style, 12 color presets plus a Custom tab,
+  and a disclaimer/GitHub link). Commands target every toy currently
+  connected to Lovense Remote.
 - `package.json` — project manifest (UUID, targets, AppMessage keys). No
   image resources — the button bar is drawn in code, not loaded from PNGs.
 
@@ -210,6 +213,86 @@ Discrete mode's red active/vibrating signal and its muted secondary tone
 changing those would blur the one visual cue the disguise actually relies on
 to communicate state.
 
+## Presets
+
+The settings page's Colors section has two tabs: **Presets** and **Custom**.
+Presets is the default — a grid of 12 ready-made looks (Lovense pink,
+Classic, Midnight, Forest, Plum, Teal, Rust, Amber, Slate, Crimson, Violet,
+Ocean), each a small live-rendered tile showing its actual bezel/background/
+text colors. Tapping one sets all six color fields at once (Basic's
+background/text/accent and Discrete's bezel/background/text), using the
+mapping: Discrete's bezel becomes Basic's accent, and Discrete's background/
+text become Basic's background/text — so a preset gives one consistent look
+across both display styles rather than needing to set six values by hand.
+
+Custom reveals the same swatch pickers as before, now with more options per
+row (7-8 instead of 4-6) after the "give more freedom, keep white/black/an
+off-white as anchors" request. Lovense pink (`#e4007c`, a reasonable but
+unverified approximation of their brand color) is available both as a
+one-tap preset and as a standalone swatch in the bezel/background/text rows,
+so it can be mixed with any other color too.
+
+There's no "save my custom combo as a new preset" flow yet — presets are the
+12 built-in ones only. That, plus preventing the same color being picked for
+text and background (which would make text invisible), are both queued for
+the next round; see "Extending it" below.
+
+## Idle behavior
+
+**Discrete mode**: after 10 seconds with no button press, the disguised
+`:NN` intensity reading reverts to real, ticking seconds — indistinguishable
+from an ordinary watchface at rest. The watch switches from `MINUTE_UNIT` to
+`SECOND_UNIT` tick updates only while idle in Discrete mode, to avoid the
+battery cost of ticking every second all the time. Any button press
+immediately reverts to the disguised reading and restarts the 10s timer.
+
+**Basic mode**: the same 10-second idle timer swaps the tip text to a plain
+"Idle - press any button to wake" hint. This is a static swap, not a live
+countdown — the earlier mockup showed a ticking "reverts in Ns" style
+countdown, but that would need per-second ticks running in Basic mode too
+(defeating the point of only paying that battery cost in Discrete), so it
+was simplified to a one-shot state change instead.
+
+Both are driven by one shared `s_idle` flag and `reset_idle_timer()`, called
+from every real button handler (not from incoming AppMessages, which
+shouldn't count as "interaction").
+
+## Round display support (Chalk)
+
+Chalk's round screen automatically clips anything drawn outside its
+physical circle, which changes how a couple of things need to be drawn:
+
+- **Discrete's bezel** (`frame_update_proc`): on rectangular platforms, a
+  small-radius full-bleed rectangle plus an inset rounded rectangle (see
+  "edge-to-edge bezel" below). On Chalk, a plain full-bleed square already
+  reads as a solid bezel disc thanks to the hardware clip - but the inner
+  face needs an explicit `graphics_fill_circle`, since an inset rectangle
+  would just show sharp corners sitting inside that clip, not a smaller
+  circle.
+- **Basic mode's button bar**: a vertical strip on the right edge (the
+  rectangular-platform layout) would get clipped near the top and bottom on
+  a circle. On Chalk it becomes a horizontal row along the bottom instead -
+  same three icons, left to right.
+- **Layout insets**: the day-of-week row, corner glyphs, and vertical
+  spacing in Discrete mode all use larger margins on Chalk, since a circle
+  has much less usable width away from its vertical center than a rectangle
+  does.
+
+All of this is behind `#if defined(PBL_ROUND)` and was never tested on
+actual round hardware (Rebble's current SDK doesn't include a Chalk unit
+this project has access to) - the emulator is the only thing this has run
+against. Real-hardware layout tuning may be needed.
+
+## Edge-to-edge bezel (rectangular platforms)
+
+The original bezel used a large outer corner radius (16px) that didn't
+reach the screen's true physical corners, leaving the window's background
+color visible in a small gap at each corner on real Emery hardware - a bug
+reported on a physical Pebble Time 2. Fixed by shrinking the outer radius to
+4px (flush to the edge) while leaving the inner radius at 13px unchanged,
+per feedback that the larger inner curve looked better than a matching flush
+inner edge.
+
 ## Memory optimizations and debug logging
 
 After the Emery crash (`App fault!` with `LR` pointing into RAM — a pattern
@@ -337,14 +420,36 @@ above, a couple of other things in Lovense's public docs stood out:
 
 ## Extending it
 
-Ideas if you want to build on this:
+Deferred from this build - genuinely new features that deserve their own
+focused testing pass rather than being bundled into a big release, given how
+fragile this specific hardware/toolchain combination has proven (see the
+`strtol()` writeup above):
+
+- **Toy Settings screen** (renamed from an earlier "Diagnostics" concept) -
+  connection/battery/socket status, a "Test connection" button (one-off
+  `GetToys` check), a "Test vibration" button (brief low-intensity pulse),
+  and custom toy groups (named subsets of connected toys, sent as an array
+  in the `toy` field per Remote 7.71.0+ - confirmed feasible, not yet built).
+- Light/dark mode toggle for the settings page's own chrome (separate from
+  the watch's Basic/Discrete colors) - accent buttons would stay the same
+  pink in both modes; only backgrounds/text/dividers would flip.
+- A three-state toy-connection glyph (connecting/connected/disconnected)
+  instead of the current two-state one, to avoid the brief window right
+  after launch where "connected" is shown optimistically before the first
+  real check completes.
+- A persistent toy name + battery-source row in Basic mode (currently
+  Discrete-only), plus a settings toggle for whether that battery reading
+  is the watch's own or the toy's.
+- "Save custom colors as a new named preset" (local-only, with delete) —
+  the Presets tab currently only has the 12 built-in ones.
+- Preventing the same color being selected for text and background in
+  Custom mode, since that would make text invisible.
+
+Other ideas:
 - Support targeting multiple specific toys at once (not just one or all) by
-  sending an array in the `toy` field, per Remote 7.71.0+.
+  sending an array in the `toy` field, per Remote 7.71.0+ (same mechanism
+  toy groups above would use).
 - Persist the selected pattern and toy with `persist_write_int`/a small
-  on-watch string buffer, the same way `ui_style` and the Basic colors are,
-  if you want them to survive app restarts.
-- Make Discrete mode's row tick with real seconds when paused (so it's
-  indistinguishable from a real watchface at rest), only switching to the
-  intensity readout while actively vibrating.
-- Add a full color picker (rather than preset swatches) to the settings page
-  for either mode's colors.
+  on-watch string buffer, the same way `ui_style` and the colors are, if you
+  want them to survive app restarts.
+- Real hardware testing and layout tuning for the Chalk (round) variant.

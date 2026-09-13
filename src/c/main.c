@@ -33,7 +33,11 @@
 #define PATTERN_WAVE 2
 #define PATTERN_COUNT 3
 
-#define BUTTON_BAR_WIDTH 20
+#if defined(PBL_ROUND)
+#define BASIC_BAR_SIZE 26 // height of the bottom bar on round displays
+#else
+#define BASIC_BAR_SIZE 20 // width of the right-edge bar on rectangular displays
+#endif
 
 static const char *PATTERN_NAMES[PATTERN_COUNT] = { "STEADY", "PULSE", "WAVE" };
 
@@ -83,6 +87,11 @@ static bool s_toy_connected = true; // optimistic until the phone reports otherw
 static char s_toy_name[24] = "All Toys";
 static AppTimer *s_toy_display_timer = NULL;
 static int s_current_wday = 0; // 0=Sunday, read by the day-row draw callback
+
+static bool s_idle = false; // true after IDLE_TIMEOUT_MS with no button press
+static AppTimer *s_idle_timer = NULL;
+#define IDLE_TIMEOUT_MS 10000
+#define IDLE_HINT_TEXT "Idle - press any\nbutton to wake"
 
 static GColor s_basic_bg_color;
 static GColor s_basic_text_color;
@@ -151,23 +160,44 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
   // the phone's settings page.
   GRect bounds = layer_get_bounds(layer);
   graphics_context_set_fill_color(ctx, s_discrete_bezel_color);
-  graphics_fill_rect(ctx, bounds, 16, GCornersAll);
+#if defined(PBL_ROUND)
+  // Round hardware (Chalk) clips anything drawn outside the physical circle
+  // automatically, so a full-bleed square fill already reads as a solid
+  // bezel disc with no extra work. The inner face needs an explicit circle
+  // though - an inset rectangle would just show sharp corners inside the
+  // round clip, not a smaller circle.
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_fill_color(ctx, s_discrete_bg_color);
+  GPoint center = grect_center_point(&bounds);
+  int16_t radius = (bounds.size.w / 2) - 6;
+  graphics_fill_circle(ctx, center, radius);
+#else
+  // Flush to the true screen edge (small radius) rather than the old large
+  // outer rounding, which left the background color visible in the real
+  // corners on rectangular hardware. The inner curve is unchanged.
+  graphics_fill_rect(ctx, bounds, 4, GCornersAll);
   GRect inner = GRect(bounds.origin.x + 4, bounds.origin.y + 4,
                        bounds.size.w - 8, bounds.size.h - 8);
   graphics_context_set_fill_color(ctx, s_discrete_bg_color);
   graphics_fill_rect(ctx, inner, 13, GCornersAll);
+#endif
 }
 
 static void day_row_update_proc(Layer *layer, GContext *ctx) {
   // Draws all 7 weekday letters in one layer instead of 7 separate
   // TextLayers - same visual result, far fewer allocated objects.
   GRect bounds = layer_get_bounds(layer);
+#if defined(PBL_ROUND)
+  int usable = bounds.size.w - 40; // extra inset - a circle has less width away from center
+#else
   int usable = bounds.size.w - 16;
+#endif
   int day_width = usable / 7;
+  int start_x = (bounds.size.w - usable) / 2;
   GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
 
   for (int i = 0; i < 7; i++) {
-    GRect cell = GRect(8 + i * day_width, 0, day_width, bounds.size.h);
+    GRect cell = GRect(start_x + i * day_width, 0, day_width, bounds.size.h);
     graphics_context_set_text_color(ctx, (i == s_current_wday) ? s_discrete_text_color : COLOR_LCD_MUTED);
     graphics_draw_text(ctx, WEEKDAY_LETTERS[i], font, cell,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
@@ -236,6 +266,38 @@ static void button_bar_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_fill_color(ctx, GColorWhite);
 
+#if defined(PBL_ROUND)
+  // A vertical strip on the right gets clipped near the top/bottom on a
+  // round screen, so this becomes a horizontal row along the bottom
+  // instead: up chevron, pause/play, down chevron, left to right.
+  int cy = h / 2;
+  int up_cx = w / 6;
+  int down_cx = w - w / 6;
+  int mid_cx = w / 2;
+
+  GPoint up_pts[3] = { { up_cx - 6, cy + 5 }, { up_cx + 6, cy + 5 }, { up_cx, cy - 6 } };
+  GPathInfo up_info = { .num_points = 3, .points = up_pts };
+  GPath *up_path = gpath_create(&up_info);
+  gpath_draw_filled(ctx, up_path);
+  gpath_destroy(up_path);
+
+  GPoint down_pts[3] = { { down_cx - 6, cy - 5 }, { down_cx + 6, cy - 5 }, { down_cx, cy + 6 } };
+  GPathInfo down_info = { .num_points = 3, .points = down_pts };
+  GPath *down_path = gpath_create(&down_info);
+  gpath_draw_filled(ctx, down_path);
+  gpath_destroy(down_path);
+
+  if (s_active) {
+    graphics_fill_rect(ctx, GRect(mid_cx - 7, cy - 6, 4, 12), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(mid_cx + 3, cy - 6, 4, 12), 0, GCornerNone);
+  } else {
+    GPoint play_pts[3] = { { mid_cx - 6, cy - 7 }, { mid_cx - 6, cy + 7 }, { mid_cx + 7, cy } };
+    GPathInfo play_info = { .num_points = 3, .points = play_pts };
+    GPath *play_path = gpath_create(&play_info);
+    gpath_draw_filled(ctx, play_path);
+    gpath_destroy(play_path);
+  }
+#else
   int cx = w / 2;
   int up_cy = h / 6;
   int down_cy = h - h / 6;
@@ -265,6 +327,7 @@ static void button_bar_update_proc(Layer *layer, GContext *ctx) {
     gpath_draw_filled(ctx, play_path);
     gpath_destroy(play_path);
   }
+#endif
 }
 
 static void apply_basic_colors(void) {
@@ -328,13 +391,16 @@ static void update_time_display(struct tm *tick_time) {
     return;
   }
   // One combined row, formatted like a real HH:MM:SS readout - the last two
-  // digits are the intensity, not real seconds.
+  // digits are the intensity, not real seconds. Once idle for 10s, the last
+  // two digits switch to the real, ticking seconds instead, indistinguishable
+  // from an ordinary watchface at rest.
   static char time_buf[16];
   static char date_buf[16];
   const char *time_fmt = clock_is_24h_style() ? "%H:%M:" : "%I:%M:";
 
   size_t prefix_len = strftime(time_buf, sizeof(time_buf), time_fmt, tick_time);
-  snprintf(time_buf + prefix_len, sizeof(time_buf) - prefix_len, "%02d", s_intensity);
+  int seconds_field = s_idle ? tick_time->tm_sec : s_intensity;
+  snprintf(time_buf + prefix_len, sizeof(time_buf) - prefix_len, "%02d", seconds_field);
   text_layer_set_text(s_time_layer, time_buf);
 
   strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
@@ -349,6 +415,40 @@ static void refresh_discrete_time(void) {
 
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   update_time_display(tick_time);
+}
+
+static void apply_idle_state(void) {
+  if (s_tip_layer) {
+    text_layer_set_text(s_tip_layer, s_idle ? IDLE_HINT_TEXT : TIP_DEFAULT_TEXT);
+  }
+  // Only Discrete mode needs real per-second ticks (to show real seconds
+  // while idle) - Basic mode's idle hint doesn't need anything finer than
+  // the once-a-minute tick already running.
+  tick_timer_service_unsubscribe();
+  bool need_seconds = s_idle && (s_ui_style == UI_STYLE_DISCRETE);
+  tick_timer_service_subscribe(need_seconds ? SECOND_UNIT : MINUTE_UNIT, tick_handler);
+  refresh_discrete_time();
+}
+
+static void idle_timeout_handler(void *data) {
+  s_idle_timer = NULL;
+  s_idle = true;
+  apply_idle_state();
+}
+
+static void reset_idle_timer(void) {
+  // Called on every real button press - cancels any pending idle timeout
+  // and, if we were already idle, immediately reverts to the disguised
+  // display before starting a fresh 10s countdown.
+  if (s_idle_timer) {
+    app_timer_cancel(s_idle_timer);
+    s_idle_timer = NULL;
+  }
+  if (s_idle) {
+    s_idle = false;
+    apply_idle_state();
+  }
+  s_idle_timer = app_timer_register(IDLE_TIMEOUT_MS, idle_timeout_handler, NULL);
 }
 
 static void send_command_msg(const char *command, int intensity) {
@@ -370,6 +470,7 @@ static void send_command_msg(const char *command, int intensity) {
 }
 
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
+  reset_idle_timer();
   s_intensity += STEP;
   if (s_intensity > MAX_INTENSITY) {
     s_intensity = MAX_INTENSITY;
@@ -387,6 +488,7 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
+  reset_idle_timer();
   s_intensity -= STEP;
   if (s_intensity < 0) {
     s_intensity = 0;
@@ -401,6 +503,7 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  reset_idle_timer();
   // Pause/resume at the current intensity - doesn't touch s_intensity.
   s_active = !s_active;
   update_display();
@@ -412,6 +515,7 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void cycle_pattern(int direction) {
+  reset_idle_timer();
   s_pattern = (s_pattern + direction + PATTERN_COUNT) % PATTERN_COUNT;
   vibes_enqueue_custom_pattern(HAPTIC_PATTERNS[s_pattern]);
   update_display();
@@ -434,6 +538,7 @@ static void down_long_click_handler(ClickRecognizerRef recognizer, void *context
 }
 
 static void select_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  reset_idle_timer();
   // Ask the phone to cycle to the next toy (or "All Toys"). It replies with
   // the new selection's name via MESSAGE_KEY_toy_name.
   send_command_msg("next_toy", s_intensity);
@@ -458,36 +563,56 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
   }
   log_heap("before build_basic_ui");
 
-  int basic_width = bounds.size.w - BUTTON_BAR_WIDTH;
+#if defined(PBL_ROUND)
+  // Content uses the full width but leaves room at the bottom for the
+  // horizontal button row instead of a right-edge vertical strip. Round
+  // screens also need extra margin on all sides to stay clear of the
+  // physical circular edge.
+  int basic_width = bounds.size.w - 20;
+  int content_x = 10;
+  int content_h = bounds.size.h - BASIC_BAR_SIZE - 10;
+#else
+  int basic_width = bounds.size.w - BASIC_BAR_SIZE;
+  int content_x = 0;
+  int content_h = bounds.size.h;
+#endif
 
   s_basic_container = layer_create(bounds);
   layer_add_child(window_layer, s_basic_container);
 
-  s_intensity_layer = text_layer_create(GRect(0, 14, basic_width, 54));
+  s_intensity_layer = text_layer_create(GRect(content_x, content_h / 2 - 60, basic_width, 54));
   text_layer_set_font(s_intensity_layer, fonts_get_system_font(FONT_KEY_LECO_36_BOLD_NUMBERS));
   text_layer_set_text_alignment(s_intensity_layer, GTextAlignmentCenter);
   text_layer_set_text(s_intensity_layer, "0");
   layer_add_child(s_basic_container, text_layer_get_layer(s_intensity_layer));
 
-  s_status_layer = text_layer_create(GRect(0, 68, basic_width, 26));
+  s_status_layer = text_layer_create(GRect(content_x, content_h / 2 - 6, basic_width, 26));
   text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
   text_layer_set_text(s_status_layer, "PAUSED");
   layer_add_child(s_basic_container, text_layer_get_layer(s_status_layer));
 
-  s_pattern_layer = text_layer_create(GRect(0, 94, basic_width, 22));
+  s_pattern_layer = text_layer_create(GRect(content_x, content_h / 2 + 20, basic_width, 22));
   text_layer_set_font(s_pattern_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_pattern_layer, GTextAlignmentCenter);
   text_layer_set_text(s_pattern_layer, "STEADY");
   layer_add_child(s_basic_container, text_layer_get_layer(s_pattern_layer));
 
+#if defined(PBL_ROUND)
+  s_tip_layer = text_layer_create(GRect(content_x + 4, content_h - 30, basic_width - 8, 28));
+#else
   s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 42, basic_width - 4, 42));
+#endif
   text_layer_set_font(s_tip_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_tip_layer, GTextAlignmentCenter);
   text_layer_set_text(s_tip_layer, TIP_DEFAULT_TEXT);
   layer_add_child(s_basic_container, text_layer_get_layer(s_tip_layer));
 
-  s_button_bar_layer = layer_create(GRect(bounds.size.w - BUTTON_BAR_WIDTH, 0, BUTTON_BAR_WIDTH, bounds.size.h));
+#if defined(PBL_ROUND)
+  s_button_bar_layer = layer_create(GRect(0, bounds.size.h - BASIC_BAR_SIZE, bounds.size.w, BASIC_BAR_SIZE));
+#else
+  s_button_bar_layer = layer_create(GRect(bounds.size.w - BASIC_BAR_SIZE, 0, BASIC_BAR_SIZE, bounds.size.h));
+#endif
   layer_set_update_proc(s_button_bar_layer, button_bar_update_proc);
   layer_add_child(s_basic_container, s_button_bar_layer);
 
@@ -522,6 +647,19 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   log_heap("before build_discrete_ui");
 
   int center_y = bounds.size.h / 2;
+#if defined(PBL_ROUND)
+  int day_row_y = 32;
+  int time_y_offset = -34;
+  int date_y_offset = 16;
+  int toy_y_offset = 38;
+  int corner_margin = 30;
+#else
+  int day_row_y = 18;
+  int time_y_offset = -40;
+  int date_y_offset = 14;
+  int toy_y_offset = 36;
+  int corner_margin = 10;
+#endif
 
   s_discrete_container = layer_create(bounds);
   layer_add_child(window_layer, s_discrete_container);
@@ -530,24 +668,24 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   layer_set_update_proc(s_frame_layer, frame_update_proc);
   layer_add_child(s_discrete_container, s_frame_layer);
 
-  s_day_row_layer = layer_create(GRect(0, 18, bounds.size.w, 18));
+  s_day_row_layer = layer_create(GRect(0, day_row_y, bounds.size.w, 18));
   layer_set_update_proc(s_day_row_layer, day_row_update_proc);
   layer_add_child(s_discrete_container, s_day_row_layer);
 
-  s_bt_layer = text_layer_create(GRect(10, bounds.size.h - 26, 40, 18));
+  s_bt_layer = text_layer_create(GRect(corner_margin, bounds.size.h - 26, 40, 18));
   text_layer_set_background_color(s_bt_layer, GColorClear);
   text_layer_set_text_color(s_bt_layer, COLOR_LCD_MUTED);
   text_layer_set_font(s_bt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   layer_add_child(s_discrete_container, text_layer_get_layer(s_bt_layer));
 
-  s_battery_layer = text_layer_create(GRect(bounds.size.w - 50, bounds.size.h - 26, 40, 18));
+  s_battery_layer = text_layer_create(GRect(bounds.size.w - 40 - corner_margin, bounds.size.h - 26, 40, 18));
   text_layer_set_background_color(s_battery_layer, GColorClear);
   text_layer_set_text_color(s_battery_layer, COLOR_LCD_MUTED);
   text_layer_set_font(s_battery_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_battery_layer, GTextAlignmentRight);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_battery_layer));
 
-  s_time_layer = text_layer_create(GRect(0, center_y - 40, bounds.size.w, 50));
+  s_time_layer = text_layer_create(GRect(0, center_y + time_y_offset, bounds.size.w, 50));
   text_layer_set_background_color(s_time_layer, GColorClear);
   text_layer_set_text_color(s_time_layer, s_discrete_text_color);
   text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS));
@@ -555,7 +693,7 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   text_layer_set_text(s_time_layer, "--:--:--");
   layer_add_child(s_discrete_container, text_layer_get_layer(s_time_layer));
 
-  s_date_layer = text_layer_create(GRect(0, center_y + 14, bounds.size.w, 20));
+  s_date_layer = text_layer_create(GRect(0, center_y + date_y_offset, bounds.size.w, 20));
   text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, COLOR_LCD_MUTED);
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
@@ -563,7 +701,7 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   text_layer_set_text(s_date_layer, "");
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
 
-  s_toy_layer = text_layer_create(GRect(0, center_y + 36, bounds.size.w, 18));
+  s_toy_layer = text_layer_create(GRect(0, center_y + toy_y_offset, bounds.size.w, 18));
   text_layer_set_background_color(s_toy_layer, GColorClear);
   text_layer_set_text_color(s_toy_layer, s_discrete_text_color);
   text_layer_set_font(s_toy_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
@@ -625,6 +763,9 @@ static void switch_ui_style(void) {
   // Rebinding this here means buttons keep working no matter which UI (or
   // neither, momentarily) is currently built.
   window_set_click_config_provider(s_window, click_config_provider);
+
+  apply_idle_state();  // establishes the correct tick rate for this style
+  reset_idle_timer();  // starts (or restarts) the 10s idle countdown
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
@@ -752,8 +893,6 @@ static void init(void) {
   app_message_register_inbox_dropped(inbox_dropped_callback);
   app_message_open(APP_MESSAGE_INBOX_SIZE, APP_MESSAGE_OUTBOX_SIZE);
 
-  tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
-
   log_heap("init end");
   window_stack_push(s_window, true);
 }
@@ -762,6 +901,9 @@ static void deinit(void) {
   // Full stop for safety when the app closes, regardless of whether we were
   // paused or active.
   send_command_msg("stop", 0);
+  if (s_idle_timer) {
+    app_timer_cancel(s_idle_timer);
+  }
   tick_timer_service_unsubscribe();
   log_heap("deinit start");
   window_destroy(s_window);
