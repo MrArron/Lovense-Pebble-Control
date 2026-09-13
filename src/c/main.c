@@ -593,15 +593,20 @@ static void teardown_discrete_ui(void) {
 }
 
 static void switch_ui_style(void) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] switch_ui_style start, s_ui_style=%d", s_ui_style);
   Layer *window_layer = window_get_root_layer(s_window);
   GRect bounds = layer_get_bounds(window_layer);
   bool discrete = (s_ui_style == UI_STYLE_DISCRETE);
 
   if (discrete) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] switching to discrete: tearing down basic");
     teardown_basic_ui();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] building discrete");
     build_discrete_ui(window_layer, bounds);
   } else {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] switching to basic: tearing down discrete");
     teardown_discrete_ui();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] building basic");
     build_basic_ui(window_layer, bounds);
   }
 
@@ -609,69 +614,97 @@ static void switch_ui_style(void) {
   // Rebinding this here means buttons keep working no matter which UI (or
   // neither, momentarily) is currently built.
   window_set_click_config_provider(s_window, click_config_provider);
+  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] switch_ui_style end");
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
+  log_heap("inbox_received_callback start");
+
   Tuple *ui_style_tuple = dict_find(iterator, MESSAGE_KEY_ui_style);
   if (ui_style_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got ui_style=%d", (int)ui_style_tuple->value->int32);
     s_ui_style = (int)ui_style_tuple->value->int32;
     persist_write_int(PERSIST_KEY_UI_STYLE, s_ui_style);
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] calling switch_ui_style");
     switch_ui_style();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] switch_ui_style returned");
   }
 
   Tuple *toy_connected_tuple = dict_find(iterator, MESSAGE_KEY_toy_connected);
   if (toy_connected_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got toy_connected=%d", (int)toy_connected_tuple->value->int32);
     s_toy_connected = (bool)toy_connected_tuple->value->int32;
     update_toy_connection_glyph();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] update_toy_connection_glyph returned");
   }
 
   Tuple *toy_name_tuple = dict_find(iterator, MESSAGE_KEY_toy_name);
   if (toy_name_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got toy_name=%s", toy_name_tuple->value->cstring);
     strncpy(s_toy_name, toy_name_tuple->value->cstring, sizeof(s_toy_name) - 1);
     s_toy_name[sizeof(s_toy_name) - 1] = '\0';
     show_toy_name_briefly();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] show_toy_name_briefly returned");
   }
 
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
   if (bg_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got basic_bg_color=%s", bg_tuple->value->cstring);
     s_basic_bg_color = parse_hex_color(bg_tuple->value->cstring);
     persist_write_int(PERSIST_KEY_BASIC_BG, (int)packed_from_hex(bg_tuple->value->cstring));
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] calling apply_basic_colors (bg)");
     apply_basic_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_basic_colors (bg) returned");
   }
 
   Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_basic_text_color);
   if (text_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got basic_text_color=%s", text_tuple->value->cstring);
     s_basic_text_color = parse_hex_color(text_tuple->value->cstring);
     persist_write_int(PERSIST_KEY_BASIC_TEXT, (int)packed_from_hex(text_tuple->value->cstring));
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] calling apply_basic_colors (text)");
     apply_basic_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_basic_colors (text) returned");
   }
 
   Tuple *accent_tuple = dict_find(iterator, MESSAGE_KEY_basic_accent_color);
   if (accent_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got basic_accent_color=%s", accent_tuple->value->cstring);
     s_basic_accent_color = parse_hex_color(accent_tuple->value->cstring);
     persist_write_int(PERSIST_KEY_BASIC_ACCENT, (int)packed_from_hex(accent_tuple->value->cstring));
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] calling apply_basic_colors (accent)");
     apply_basic_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_basic_colors (accent) returned");
   }
 
   Tuple *discrete_bezel_tuple = dict_find(iterator, MESSAGE_KEY_discrete_bezel_color);
   if (discrete_bezel_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got discrete_bezel_color=%s", discrete_bezel_tuple->value->cstring);
     s_discrete_bezel_color = parse_hex_color(discrete_bezel_tuple->value->cstring);
     persist_write_int(PERSIST_KEY_DISCRETE_BEZEL, (int)packed_from_hex(discrete_bezel_tuple->value->cstring));
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] calling apply_discrete_colors (bezel)");
     apply_discrete_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_discrete_colors (bezel) returned");
   }
 
   Tuple *discrete_bg_tuple = dict_find(iterator, MESSAGE_KEY_discrete_bg_color);
   if (discrete_bg_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got discrete_bg_color=%s", discrete_bg_tuple->value->cstring);
     s_discrete_bg_color = parse_hex_color(discrete_bg_tuple->value->cstring);
     persist_write_int(PERSIST_KEY_DISCRETE_BG, (int)packed_from_hex(discrete_bg_tuple->value->cstring));
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] calling apply_discrete_colors (bg)");
     apply_discrete_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_discrete_colors (bg) returned");
   }
 
   Tuple *discrete_text_tuple = dict_find(iterator, MESSAGE_KEY_discrete_text_color);
   if (discrete_text_tuple) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] got discrete_text_color=%s", discrete_text_tuple->value->cstring);
     s_discrete_text_color = parse_hex_color(discrete_text_tuple->value->cstring);
     persist_write_int(PERSIST_KEY_DISCRETE_TEXT, (int)packed_from_hex(discrete_text_tuple->value->cstring));
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] calling apply_discrete_colors (text)");
     apply_discrete_colors();
+    APP_LOG(APP_LOG_LEVEL_INFO, "[trace] apply_discrete_colors (text) returned");
   }
 
   Tuple *command_tuple = dict_find(iterator, MESSAGE_KEY_command);
@@ -681,6 +714,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
   log_heap("after inbox_received_callback");
 }
+
 
 static void inbox_dropped_callback(AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "Message dropped: %d", (int)reason);
