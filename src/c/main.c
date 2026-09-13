@@ -324,6 +324,14 @@ static void deferred_setup(void *data) {
 static void init(void) {
   log_heap("init start");
 
+  // Direct, isolated test of the prime suspect: strtol(), called for the
+  // first time ever in this project. Nothing else runs before this.
+  const char *test_hex = "#ffffff";
+  char rs[3] = { test_hex[1], test_hex[2], 0 };
+  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] about to call strtol");
+  long r = strtol(rs, NULL, 16);
+  APP_LOG(APP_LOG_LEVEL_INFO, "[trace] strtol returned %ld", r);
+
   s_window = window_create();
   window_set_window_handlers(s_window, (WindowHandlers) {
     .load = window_load,
