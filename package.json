@@ -34,28 +34,7 @@
       "discrete_text_color"
     ],
     "resources": {
-      "media": [
-        {
-          "type": "png",
-          "name": "ICON_UP",
-          "file": "images/icon_up.png"
-        },
-        {
-          "type": "png",
-          "name": "ICON_DOWN",
-          "file": "images/icon_down.png"
-        },
-        {
-          "type": "png",
-          "name": "ICON_PAUSE",
-          "file": "images/icon_pause.png"
-        },
-        {
-          "type": "png",
-          "name": "ICON_PLAY",
-          "file": "images/icon_play.png"
-        }
-      ]
+      "media": []
     },
     "capabilities": [
       "configurable"

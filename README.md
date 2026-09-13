@@ -13,18 +13,18 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 - `src/c/main.c` — watchapp UI. UP/DOWN adjust intensity (0–20, steps of 2)
   and, held, cycle patterns. SELECT pauses/resumes at the current level.
-  **Basic mode's action bar is currently disabled** (`ENABLE_ACTION_BAR 0` at
-  the top of the file) while a startup crash on Emery gets isolated — see
-  "Known issue" below.
+  Rewritten this round for memory (see "Memory optimizations" below) — only
+  the currently-active display style's layers exist in memory at any time,
+  Basic mode's button bar is hand-drawn instead of loaded from image
+  resources, and `heap_bytes_free()`/`heap_bytes_used()` are logged at every
+  major lifecycle point to help track down the ongoing Emery crash.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
   Lovense Standard API calls (`POST /command`), including native Pulse/Wave
   pattern parameters and toy-connection polling, and provides a small
   settings page for entering the Lovense app's IP/port. Commands target
   every toy currently connected to Lovense Remote.
-- `resources/images/` — four small icons (up/down chevrons, pause, play) used
-  by Basic mode's action bar.
-- `package.json` — project manifest (UUID, targets, AppMessage keys,
-  resource declarations).
+- `package.json` — project manifest (UUID, targets, AppMessage keys). No
+  image resources — the button bar is drawn in code, not loaded from PNGs.
 
 ## 1. Set up the build toolchain
 
@@ -91,11 +91,14 @@ All commands target whichever toy (or "All Toys") is currently selected.
 ### Display styles
 
 - **Basic** — a big number for the current intensity, a "VIBRATING"/"PAUSED"
-  label, the current pattern name, and (normally) an on-screen action bar
-  with a tooltip beneath explaining the hold gestures — see "Known issue"
-  below for its current disabled state. Background, text, and accent
-  (pattern label + action bar) colors are all customizable from the phone's
-  settings page.
+  label, the current pattern name, and a button bar down the right edge
+  (chevrons for UP/DOWN, a pause/play glyph for SELECT that swaps depending
+  on state) with a tooltip beneath explaining the hold gestures. The bar is
+  drawn with vector shapes (`GPath`/rect fills) in a plain `Layer`'s draw
+  callback, not an `ActionBarLayer` with loaded icon bitmaps — see "Memory
+  optimizations" below for why. Background, text, and accent (pattern label
+  + bar background) colors are all customizable from the phone's settings
+  page.
 - **Discrete** — disguised as an ordinary minimalist digital watchface,
   styled after classic LCD watch faces: a bezel-colored border around a
   plain background, a day-of-week row with today highlighted, and small
@@ -191,7 +194,7 @@ phone's list reset to "All Toys" on relaunch.
 The settings page has color pickers (a handful of preset swatches each, not
 a full picker) for:
 
-- **Basic mode**: background, text, and accent (pattern label + action bar
+- **Basic mode**: background, text, and accent (pattern label + button bar
   background).
 - **Discrete mode**: bezel, background, and text (the last applies to the
   time row when paused, today's highlighted weekday letter, and the toy-name
@@ -207,22 +210,57 @@ Discrete mode's red active/vibrating signal and its muted secondary tone
 changing those would blur the one visual cue the disguise actually relies on
 to communicate state.
 
-## Known issue: Basic mode's action bar is disabled
+## Memory optimizations and debug logging
 
-Basic mode crashed immediately on open on a Pebble Time 2 (Emery), with a
-fault whose `LR` pointed into RAM rather than flash — a pattern usually
-caused by a stack overflow or a call through a bad function pointer. As a
-bisection step, the whole action bar subsystem (the four PNG icons and their
-`ActionBarLayer`) is gated behind `#define ENABLE_ACTION_BAR 0` at the top of
-`main.c`. With it at `0`, Basic mode falls back to a plain
-`window_set_click_config_provider` call and has no on-screen button icons or
-hints beyond the tip text.
+After the Emery crash (`App fault!` with `LR` pointing into RAM — a pattern
+usually caused by a stack overflow or a call through a bad pointer, and
+consistent with running low on heap), four changes went in:
 
-If you flip it back to `1` and it crashes again in the same way, the action
-bar/icons are cleared as suspects and the next thing to check is the
+1. **Right-sized AppMessage buffers.** `app_message_open()` previously used
+   `app_message_inbox_size_maximum()`/`..._outbox_size_maximum()`, which
+   requests the largest buffer the platform allows. Everything this app
+   actually sends is a handful of short strings and ints — the buffers are
+   now fixed at 128 bytes each (`APP_MESSAGE_INBOX_SIZE`/`_OUTBOX_SIZE`),
+   comfortably more than needed without reserving platform-maximum space.
+2. **Only the active display style exists in memory.** Previously both
+   Basic's and Discrete's layers were created up front and the inactive one
+   was just hidden (`layer_set_hidden`), meaning both were permanently
+   resident. `build_basic_ui`/`teardown_basic_ui` and
+   `build_discrete_ui`/`teardown_discrete_ui` now construct and destroy each
+   style's layers on demand; `switch_ui_style()` tears down whichever one
+   isn't needed and builds the other, both on first launch and whenever the
+   phone sends a new `ui_style`.
+3. **The day-of-week row is one `Layer`, not seven `TextLayer`s.** A single
+   custom draw callback (`day_row_update_proc`) now renders all 7 letters,
+   coloring today's differently from `s_current_wday` — same visual result,
+   one allocated object instead of seven.
+4. **Basic mode's button bar is hand-drawn, not loaded from bitmaps.** The
+   previous `ActionBarLayer` + four PNG icon resources are gone entirely,
+   replaced by a plain `Layer` (`button_bar_update_proc`) that draws the
+   chevrons with `GPath`/`gpath_draw_filled` and the pause/play glyph with
+   rect fills and a `GPath` triangle. This removes `gbitmap_create_with_resource`
+   from the app entirely (a suspect for the crash, not just a memory cost)
+   along with the image files and their `package.json` resource entries.
+
+**Debug logging**: `heap_bytes_free()`/`heap_bytes_used()` are now logged
+(via a small `log_heap()` helper) at `init` start/end, `window_load`
+start/end, before/after each UI style's build and teardown, and after every
+processed AppMessage. Watching these numbers via `pebble logs` should show
+directly whether the app is close to a memory ceiling, and if a leak exists,
+which lifecycle point it's tied to (heap should return to roughly the same
+free value after a teardown as it was before the matching build — if it
+doesn't, something in that build/teardown pair isn't being freed). This
+logging is meant to stay in place until the crash is fully resolved, then
+can be trimmed down or removed.
+
+**If it still crashes with all of this in place**, the next things to
+check, in order: (a) whether the reported heap numbers were already low
+before the crash (confirms/rules out memory pressure directly), (b) the
 `GColor8`/`.argb` color-parsing code (`parse_hex_color`,
-`packed_from_hex`/`color_from_packed`) added around the same time, since
-that's new, untested-on-real-hardware code too.
+`packed_from_hex`/`color_from_packed`), since it's still new and
+untested-on-real-hardware, (c) the WebSocket-based Toy Events client on the
+phone side, though a phone-side JS issue wouldn't typically produce a watch
+`App fault!` like this.
 
 ## Other Lovense API features worth considering
 
