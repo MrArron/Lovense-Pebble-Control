@@ -1,6 +1,13 @@
 #include <pebble.h>
 #include <stdlib.h>
 
+// DIAGNOSTIC FLAG: set to 1 to re-enable the action bar + its icons once the
+// crash on Emery is isolated. Currently 0 to bisect an "App fault!" (PC in
+// flash, LR pointing into RAM - consistent with a stack overflow or a bad
+// function pointer) that happens immediately on open, before any button
+// press or AppMessage is processed.
+#define ENABLE_ACTION_BAR 0
+
 // Lovense toys accept vibration intensity on a 0-20 scale over the Standard API.
 #define MAX_INTENSITY 20
 #define STEP 2
@@ -186,11 +193,13 @@ static void apply_ui_style(void) {
   // matters for Basic mode.
   window_set_background_color(s_window, s_basic_bg_color);
 
+#if ENABLE_ACTION_BAR
   if (discrete) {
     layer_set_hidden(action_bar_layer_get_layer(s_action_bar), true);
   } else {
     layer_set_hidden(action_bar_layer_get_layer(s_action_bar), false);
   }
+#endif
 }
 
 static void apply_basic_colors(void) {
@@ -199,7 +208,9 @@ static void apply_basic_colors(void) {
   text_layer_set_text_color(s_status_layer, s_basic_text_color);
   text_layer_set_text_color(s_tip_layer, s_basic_text_color);
   text_layer_set_text_color(s_pattern_layer, s_basic_accent_color);
+#if ENABLE_ACTION_BAR
   action_bar_layer_set_background_color(s_action_bar, s_basic_accent_color);
+#endif
 }
 
 static void update_basic_display(void) {
@@ -208,8 +219,11 @@ static void update_basic_display(void) {
   text_layer_set_text(s_intensity_layer, intensity_buf);
   text_layer_set_text(s_status_layer, s_active ? "VIBRATING" : "PAUSED");
   text_layer_set_text(s_pattern_layer, PATTERN_NAMES[s_pattern]);
+#if ENABLE_ACTION_BAR
   action_bar_layer_set_icon(s_action_bar, BUTTON_ID_SELECT, s_active ? s_icon_pause : s_icon_play);
+#endif
 }
+
 
 static void update_discrete_display(void) {
   text_layer_set_text_color(s_time_layer, s_active ? COLOR_TIME_ACTIVE : COLOR_TIME_PAUSED);
@@ -383,6 +397,7 @@ static void window_load(Window *window) {
   GRect bounds = layer_get_bounds(window_layer);
   int center_y = bounds.size.h / 2;
 
+#if ENABLE_ACTION_BAR
   s_icon_up = gbitmap_create_with_resource(RESOURCE_ID_ICON_UP);
   s_icon_down = gbitmap_create_with_resource(RESOURCE_ID_ICON_DOWN);
   s_icon_pause = gbitmap_create_with_resource(RESOURCE_ID_ICON_PAUSE);
@@ -399,6 +414,10 @@ static void window_load(Window *window) {
   // Basic UI content is narrower than the full screen to leave room for the
   // action bar along the right edge.
   int basic_width = bounds.size.w - ACTION_BAR_WIDTH;
+#else
+  window_set_click_config_provider(window, click_config_provider);
+  int basic_width = bounds.size.w;
+#endif
 
   s_basic_container = layer_create(bounds);
   layer_add_child(window_layer, s_basic_container);
@@ -516,11 +535,13 @@ static void window_unload(Window *window) {
   layer_destroy(s_frame_layer);
   layer_destroy(s_discrete_container);
 
+#if ENABLE_ACTION_BAR
   action_bar_layer_destroy(s_action_bar);
   gbitmap_destroy(s_icon_up);
   gbitmap_destroy(s_icon_down);
   gbitmap_destroy(s_icon_pause);
   gbitmap_destroy(s_icon_play);
+#endif
 }
 
 static void init(void) {
