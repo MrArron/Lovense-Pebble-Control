@@ -45,15 +45,66 @@ function postCommand(bodyObj) {
   xhr.send(JSON.stringify(bodyObj));
 }
 
+var PATTERN_STEADY = 0;
+var PATTERN_PULSE = 1;
+var PATTERN_WAVE = 2;
+
+// Pulse/Wave aren't sent as a single named preset command - Lovense's
+// documented Standard API only confirms the Function (Vibrate:N) and
+// GetToys commands; the exact JSON for built-in presets isn't publicly
+// pinned down. To avoid guessing at an unverified schema, both patterns are
+// built here as a timed loop of ordinary Vibrate calls, which we know works.
+var s_patternTimer = null;
+var PULSE_STEP_MS = 550;
+var WAVE_STEP_MS = 350;
+var WAVE_SHAPE = [0.2, 0.4, 0.7, 1, 0.7, 0.4]; // relative to the chosen intensity
+
+function stopPatternLoop() {
+  if (s_patternTimer !== null) {
+    clearInterval(s_patternTimer);
+    s_patternTimer = null;
+  }
+}
+
+function startPulseLoop(intensity) {
+  var on = true;
+  sendVibrate(intensity);
+  s_patternTimer = setInterval(function () {
+    on = !on;
+    sendVibrate(on ? intensity : 0);
+  }, PULSE_STEP_MS);
+}
+
+function startWaveLoop(intensity) {
+  var i = 0;
+  s_patternTimer = setInterval(function () {
+    var level = Math.round(intensity * WAVE_SHAPE[i % WAVE_SHAPE.length]);
+    sendVibrate(level);
+    i++;
+  }, WAVE_STEP_MS);
+}
+
 function sendVibrate(intensity) {
   var clamped = Math.max(0, Math.min(20, intensity));
   postCommand({ command: 'Function', action: 'Vibrate:' + clamped, timeSec: 0, apiVer: 1 });
 }
 
 function sendStop() {
+  stopPatternLoop();
   // Route through the same Function/Vibrate path used to start vibration,
   // just at intensity 0, so stopping is exactly as reliable as starting.
   sendVibrate(0);
+}
+
+function startPattern(pattern, intensity) {
+  stopPatternLoop();
+  if (pattern === PATTERN_PULSE) {
+    startPulseLoop(intensity);
+  } else if (pattern === PATTERN_WAVE) {
+    startWaveLoop(intensity);
+  } else {
+    sendVibrate(intensity);
+  }
 }
 
 function sendUiStyleToWatch(uiStyle) {
@@ -74,9 +125,10 @@ Pebble.addEventListener('ready', function () {
 Pebble.addEventListener('appmessage', function (e) {
   var command = e.payload.command;
   var intensity = e.payload.intensity;
+  var pattern = e.payload.pattern || PATTERN_STEADY;
 
   if (command === 'vibrate') {
-    sendVibrate(intensity);
+    startPattern(pattern, intensity);
   } else if (command === 'pause' || command === 'stop') {
     sendStop();
   } else {

@@ -11,13 +11,17 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## What's included
 
-- `src/c/main.c` — watchapp UI. UP/DOWN adjust intensity (0–20, steps of 2),
-  SELECT pauses/resumes at the current level.
+- `src/c/main.c` — watchapp UI. UP/DOWN adjust intensity (0–20, steps of 2)
+  and, held, cycle patterns. SELECT pauses/resumes at the current level.
+  Basic mode has an on-screen action bar; Discrete mode has none.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
-  Lovense Standard API calls (`POST /command`), and provides a small settings
-  page for entering the Lovense app's IP/port. Commands target every toy
-  currently connected to Lovense Remote.
-- `package.json` — project manifest (UUID, targets, AppMessage keys).
+  Lovense Standard API calls (`POST /command`), runs the Pulse/Wave pattern
+  loops, and provides a small settings page for entering the Lovense app's
+  IP/port. Commands target every toy currently connected to Lovense Remote.
+- `resources/images/` — four small icons (up/down chevrons, pause, play) used
+  by Basic mode's action bar.
+- `package.json` — project manifest (UUID, targets, AppMessage keys,
+  resource declarations).
 
 ## 1. Set up the build toolchain
 
@@ -61,11 +65,15 @@ pattern) so it can accept installs over Wi-Fi.
 
 ## 5. Use it
 
-Same three buttons regardless of display style:
+Same buttons regardless of display style:
 
 - **UP / DOWN** — adjust intensity (0–20, steps of 2). You can do this while
   paused too — it just sets the level that the next resume will use, without
   making anything buzz.
+- **Hold UP / hold DOWN** — cycle patterns forward/backward: Steady → Pulse →
+  Wave → back to Steady. If you're actively vibrating, the toy switches to
+  the new pattern immediately; if paused, it just changes what resume will
+  use.
 - **SELECT** — pause/resume. Pausing stops vibration but remembers the
   intensity; resuming sends that same level again.
 
@@ -74,14 +82,32 @@ no per-toy selection.
 
 ### Display styles
 
-- **Basic** — the straightforward layout: a big number for the current
-  intensity, a "VIBRATING"/"PAUSED" label, and on-screen button hints.
-- **Discrete** — disguised as an ordinary minimalist watchface. It shows the
-  real time large and centered (with today's day/date beneath), and tucks the
-  intensity into a small ":NN" readout where seconds would normally sit — it
-  doesn't tick like real seconds, but at a glance it reads as a watchface. The
-  only sign of active/paused state is that readout's color (a muted gray when
-  paused, red when vibrating) — no text anywhere says what it's controlling.
+- **Basic** — a big number for the current intensity, a "VIBRATING"/"PAUSED"
+  label, the current pattern name, and an on-screen action bar (chevrons for
+  UP/DOWN, a pause/play icon for SELECT that swaps depending on state) with a
+  tooltip beneath explaining the hold-to-cycle-patterns gesture.
+- **Discrete** — disguised as an ordinary minimalist digital watchface, with
+  no action bar and no labels. Time and the disguised intensity share a
+  single row formatted like a real `HH:MM:SS` readout (e.g. `20:49:12`,
+  where `12` is the intensity, not real seconds) — day/date sits beneath. The
+  only sign of active/paused state is that row's color (white when paused,
+  red when vibrating). The current pattern isn't shown anywhere in this mode
+  by design — switch to Basic momentarily if you need to confirm it.
+
+## Patterns
+
+Steady sends a constant `Vibrate:N`. Pulse and Wave are built as timed loops
+of ordinary `Vibrate:N` calls on the phone (alternating on/off for Pulse,
+ramping up and down through a shape for Wave) rather than one of Lovense's
+built-in named presets — the Standard API's publicly documented commands only
+confirm `Function` (`Vibrate:N`) and `GetToys`; the exact JSON for built-in
+presets like `pulse`/`wave`/`fireworks` isn't pinned down anywhere public, so
+this avoids guessing at an unverified schema. If you get access to Lovense's
+full developer docs and confirm the real preset format, swapping it in is a
+small change to `startPulseLoop`/`startWaveLoop` in `index.js`.
+
+Pattern selection isn't persisted — it resets to Steady each time the
+watchapp is launched.
 
 ## Notes and troubleshooting
 
@@ -92,7 +118,8 @@ no per-toy selection.
   Lovense API and what status code comes back.
 - Pausing sends a `Vibrate:0` command rather than a separate stop command —
   the same mechanism used to start vibration, just at zero — so stopping is
-  exactly as reliable as starting, regardless of toy or firmware quirks.
+  exactly as reliable as starting, regardless of toy or firmware quirks. It
+  also clears any running Pulse/Wave timer, so nothing fires after a pause.
 - Game Mode's IP can change if the phone reconnects to Wi-Fi — re-check it in
   the Lovense app if control suddenly stops working.
 - The watchapp sends a full "stop" command when it's closed, so leaving the
@@ -104,12 +131,10 @@ no per-toy selection.
 ## Extending it
 
 Ideas if you want to build on this:
-- Add more patterns (pulse, wave) by sending Lovense's `Preset:` actions
-  instead of raw `Vibrate:`.
-- Add a vibration-strength bar using Pebble's `ActionBarLayer` instead of
-  plain button clicks, for finer control in Basic mode.
 - Target a specific toy instead of all connected toys by adding a `toy` field
   (a toy ID from Lovense's `GetToys` command) to the outgoing command body.
-- Make Discrete mode's "seconds" tick with real seconds when paused (so it's
+- Persist the selected pattern with `persist_write_int`, the same way
+  `ui_style` is persisted, if you want it to survive app restarts.
+- Make Discrete mode's row tick with real seconds when paused (so it's
   indistinguishable from a real watchface at rest), only switching to the
   intensity readout while actively vibrating.
