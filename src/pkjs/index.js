@@ -6,6 +6,18 @@
 
 var DEFAULT_PORT = '20010';
 
+// Escapes text before it's spliced into the generated settings-page HTML.
+// Needed anywhere a value could come from outside this device's own saved
+// settings - toy id/name come from the Lovense LAN API (GetToys/Events
+// socket), which is unauthenticated and spoofable by anything on the same
+// network, so a crafted id like `">script...` could otherwise break out of
+// an attribute and run script in the config webview.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
 function getSetting(key, fallback) {
   var val = localStorage.getItem(key);
   return (val === null || val === undefined || val === '') ? fallback : val;
@@ -710,9 +722,11 @@ Pebble.addEventListener('showConfiguration', function () {
 
   var knownToysHtml = knownToys.length ? knownToys.map(function (t) {
     var dot = t.connected === null ? '#666' : (t.connected ? '#2ecc71' : '#e74c3c');
+    // t.id/t.name come from the Lovense LAN API (unauthenticated, spoofable
+    // by anything on the network) - always escape before splicing into HTML.
     return '<div class="toy-row"><span class="toy-dot" style="background:' + dot + '"></span>' +
-      '<span class="toy-row-name">' + t.name + '</span><span class="toy-row-batt">' + t.battery + '</span>' +
-      '<label class="toy-check"><input type="checkbox" class="group-member" value="' + t.id + '"> in group</label></div>';
+      '<span class="toy-row-name">' + escapeHtml(t.name) + '</span><span class="toy-row-batt">' + escapeHtml(t.battery) + '</span>' +
+      '<label class="toy-check"><input type="checkbox" class="group-member" value="' + escapeHtml(t.id) + '"> in group</label></div>';
   }).join('') : '<p class="hint">No toys known yet - open Lovense Remote and connect one, or just save the IP/port above and come back.</p>';
 
   var html = '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">' +
@@ -875,6 +889,10 @@ Pebble.addEventListener('showConfiguration', function () {
     'var toyGroups = (function(){try{return ' + (toyGroupsRaw || '[]') + ';}catch(e){return [];}})();' +
     'var currentTheme = "' + settingsTheme + '";' +
 
+    'function escapeHtml(s){' +
+    'return String(s).replace(/[&<>]/g,function(c){if(c==="&")return"&amp;";if(c==="<")return"&lt;";return"&gt;";});' +
+    '}' +
+
     'function blendHex(hexA, hexB){' +
     'var a={r:parseInt(hexA.substr(1,2),16),g:parseInt(hexA.substr(3,2),16),b:parseInt(hexA.substr(5,2),16)};' +
     'var b={r:parseInt(hexB.substr(1,2),16),g:parseInt(hexB.substr(3,2),16),b:parseInt(hexB.substr(5,2),16)};' +
@@ -913,7 +931,7 @@ Pebble.addEventListener('showConfiguration', function () {
     '\'<div class="preset-days" style="color:\'+muted+\'">S M T <b style="color:\'+preset.text+\'">W</b> T F S</div>\' +' +
     '\'<div class="preset-time" style="color:\'+preset.text+\'">20:49</div>\' +' +
     '\'<div class="preset-date" style="color:\'+muted+\'">FRI 22</div>\' +' +
-    '\'</div></div><span>\'+preset.name+\'</span></div>\';' +
+    '\'</div></div><span>\'+escapeHtml(preset.name)+\'</span></div>\';' +
     '}' +
 
     'function renderPresetGrid(){' +
@@ -1030,7 +1048,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'function renderGroupList(){' +
     'var html = toyGroups.length ? "" : \'<p class="hint">No groups saved yet.</p>\';' +
     'for (var i=0;i<toyGroups.length;i++){' +
-    'html += \'<div class="group-row"><span>\'+toyGroups[i].name+\' (\'+toyGroups[i].toyIds.length+\')</span>\'+' +
+    'html += \'<div class="group-row"><span>\'+escapeHtml(toyGroups[i].name)+\' (\'+toyGroups[i].toyIds.length+\')</span>\'+' +
     '\'<span class="group-del" onclick="deleteGroup(\'+i+\')">&times;</span></div>\';' +
     '}' +
     'document.getElementById("groupList").innerHTML = html;' +
