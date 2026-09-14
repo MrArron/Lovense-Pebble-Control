@@ -11,16 +11,12 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Confirmed working on real Pebble Time 2 hardware**, pre-Discrete-redesign
-checkpoint: boot (the `strtol()` root-cause fix holds), Basic mode
-(background/text/accent colors render correctly, contrast fix applied), the
-Presets tab (correct initial-match highlighting, full mini-preview tiles),
-and the idle-revert behavior.
+**Confirmed working on real Pebble Time 2 hardware**: boot, Basic mode, both
+Discrete faces (Analog/Digital) render and the idle-revert behavior works as
+designed. Real-device testing also surfaced three bugs, now fixed - see
+"Fixed this pass" below.
 
-**Discrete mode was redesigned** from a single disguised-digital face (1a)
-into two selectable faces — see "Display styles" below. This is a large,
-not-yet-hardware-tested change (written from a pixel-exact design spec, not
-verified on a physical Emery or in the emulator yet):
+**Discrete mode has two selectable faces** — see "Display styles" below:
 
 - **Analog** — an ordinary analog watch face; the second hand encodes
   vibration level (position + color), reverting to true seconds after the
@@ -28,30 +24,43 @@ verified on a physical Emery or in the emulator yet):
 - **Digital** — digital time with a chronograph-style sub-dial at 6 o'clock
   encoding level, plus a Steady/Pulse/Wave totalizer register.
 
-Both faces share the existing bezel/background/text color model plus a new
-independent **active (vibrating) color**, default Lovense pink, never reset
-by presets. `frame_update_proc`/`day_row_update_proc`/`blend_colors` carried
-over unchanged from 1a. Non-Emery rectangular platforms (aplite/basalt/
-diorite) get every Emery-derived layout constant scaled proportionally
-rather than clipped; Chalk keeps its own hand-tuned numbers.
+Both faces share the existing bezel/background/text color model plus an
+independent **active (vibrating) color**, default Lovense pink (`#FF2D89`,
+per Lovense's own site), never reset by presets. Non-Emery rectangular
+platforms (aplite/basalt/diorite) get every Emery-derived layout constant
+scaled proportionally rather than clipped; Chalk keeps its own hand-tuned
+numbers.
 
-Also implemented this pass: a **Toy Settings** tab (status, Test connection/
-Test vibration buttons that talk to the Lovense API directly from the
-settings page, custom toy groups targeting multiple toys at once via a
-comma-joined `toy` field), a light/dark toggle for the settings page's own
-chrome, a persistent toy-name + battery row in Basic mode with a watch-vs-toy
-battery-source setting, "save custom colors as a new named preset" (with
-delete), and preventing the same color being picked for text and background.
+Also built: a **Toy Settings** tab (status, Test connection/Test vibration
+buttons that talk to the Lovense API directly from the settings page, custom
+toy groups targeting multiple toys at once via a comma-joined `toy` field),
+a light/dark toggle for the settings page's own chrome, a persistent
+toy-name + battery row in Basic mode with a watch-vs-toy battery-source
+setting, "save custom colors as a new named preset" (with delete),
+preventing the same color being picked for text and background, and a
+three-state (connecting/connected/disconnected) BT status glyph that blinks
+while connecting and updates immediately if the toy-events socket drops
+mid-session. The default color scheme (both display styles) is now the
+"Lovense pink" preset, and the watch has a launcher icon based on Lovense's
+logo (`resources/images/icon~color.png` / `icon~bw.png`).
 
-**Untested**: none of the above has run on real hardware or in the emulator
-yet - this whole pass needs a `pebble build`/`pebble install` verification
-round before being trusted on a physical watch. The Chalk (round display)
-variant was already untested before this pass and remains so.
+**Fixed this pass** (found via real-hardware testing): `GetToys`'s `toys`
+field is a JSON-**encoded string**, not a plain object — `Object.keys()` on
+it was iterating characters, not toy entries, which broke toy-name display,
+the BT status, and the settings page's "Test connection" toy count (it was
+reporting the JSON blob's character count). Also: the analog/chrono hands'
+thinnest widths degenerated to a hairline at most rotation angles due to
+Pebble's fixed-point trig truncating at `half_width=1`; and Basic mode's
+idle timer (now removed) and tip text (now shifted up) were clipped by the
+watch's physical bezel.
 
-**Deferred, not yet built** (explicitly out of scope for this pass): a
-three-state (connecting/connected/disconnected) toy-connection glyph,
-persisting the selected pattern/toy across app restarts, and real-hardware
-testing/layout tuning for Chalk. See "Extending it" at the bottom.
+**Untested**: this pass's changes haven't run on real hardware yet - needs
+a `pebble build`/`pebble install` round. Chalk (round display) remains
+untested on physical hardware.
+
+**Deferred, not yet built**: persisting the selected pattern/toy across app
+restarts, and real-hardware testing/layout tuning for Chalk. See "Extending
+it" at the bottom.
 
 **To resume this work in a new session**, the most useful things to paste
 back in are: this README (has all the design decisions and reasoning), and
@@ -68,17 +77,28 @@ to change for any of the deferred features above.
   time; Basic mode's button bar is hand-drawn instead of loaded from image
   resources; `heap_bytes_free()`/`heap_bytes_used()` are still logged at
   every major lifecycle point (kept in place through active development).
-  Includes Discrete's 10s idle-revert-to-real-seconds, Basic's matching idle
-  hint, the round-display (Chalk) layout variant, and the edge-to-edge bezel
-  fix — see their own sections below.
+  Includes Discrete's 10s idle-revert-to-real-seconds (Analog/Digital hand
+  position, not Basic — see "Idle behavior"), the round-display (Chalk)
+  layout variant, and the edge-to-edge bezel fix — see their own sections
+  below.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
   Lovense Standard API calls (`POST /command`), including native Pulse/Wave
-  pattern parameters and toy-connection polling, and provides the settings
-  page (connection info, display style, 12 color presets plus a Custom tab,
-  and a disclaimer/GitHub link). Commands target every toy currently
-  connected to Lovense Remote.
-- `package.json` — project manifest (UUID, targets, AppMessage keys). No
-  image resources — the button bar is drawn in code, not loaded from PNGs.
+  pattern parameters and toy-connection polling/events, and provides the
+  settings page (connection info, display style, 15 color presets plus a
+  Custom tab and a Toy tab, and a disclaimer/GitHub link). Commands target
+  every toy currently connected to Lovense Remote, or a saved multi-toy
+  group.
+- `package.json` — project manifest (UUID, targets, AppMessage keys,
+  `resources.media` for the launcher icon). The button bar is still drawn
+  in code, not loaded from a PNG - the only bundled image resource is the
+  launcher icon itself (see `resources/images/`).
+- `resources/images/icon~color.png` / `icon~bw.png` — the watch's launcher
+  icon shown in Pebble OS's app list, based on Lovense's logo in the app's
+  Lovense-pink brand color (color platforms) and a black/white variant
+  (Aplite/Diorite). Declared as `MENU_ICON` in `package.json`.
+- `STORE_LISTING.md` — copy for the Pebble/Rebble app store listing (not a
+  build input - that store's submission happens through a separate web
+  form, this is just where the text lives).
 
 ## 1. Set up the build toolchain
 
@@ -220,8 +240,18 @@ watchapp is launched.
 The Discrete face's status row (labeled "BT") shows whether the Lovense toy
 itself is still connected to the phone — not the watch's own Bluetooth link
 to the phone, which is a separate, less useful signal. The "BT" label itself
-stays muted either way; a small dot next to it carries the state instead —
-muted when connected, red when lost — so the label doesn't need to recolor.
+stays muted in every state; a small dot next to it carries the state
+instead, in three states (`BT_STATE_CONNECTING`/`CONNECTED`/`DISCONNECTED`
+in `main.c`, sent as the same 0/1/2 values over the existing `toy_connected`
+key from `index.js`):
+
+- **Connecting** — an unfilled ring, blinking on/off every 650ms
+  (`s_bt_blink_timer`), muted color. Shown before the first real answer
+  arrives (optimistic-unknown default on launch), and again if the toy-
+  events socket drops mid-session while a reconnect is pending.
+- **Connected** — a filled disc, muted color.
+- **Disconnected** — a filled disc, fixed red — the ring/fill distinction
+  plus color is what tells the three states apart at a glance.
 
 The primary source is the **Toy Events API** — a WebSocket connection
 (`ws://{ip}:{port}/v1`) that pushes `toy-list` and `toy-status` events the
@@ -230,7 +260,19 @@ waiting on a poll. `index.js` connects to it on launch, sends the required
 `access` handshake and a `ping` every 5 seconds to keep it alive, and tracks
 each toy's connected state as events arrive. If Game Mode is turned off, an
 `event-closed` event fires and the socket closes; if it drops for any other
-reason (Wi-Fi hiccup, app restart), it retries every 10 seconds.
+reason (Wi-Fi hiccup, app restart), it retries every 10 seconds — and the
+watch shows "connecting" again the moment the socket closes, resolving back
+to connected/disconnected via whichever check completes next (the socket's
+own reconnect, or the `GetToys` fallback below, which re-enables itself the
+instant the socket drops).
+
+**`GetToys`'s response has a quirk worth knowing if you touch this code**:
+`data.toys` in the JSON response is itself a JSON-encoded *string*, not a
+nested object — `JSON.parse()` it again before treating it as
+`{toyId: toyObject}`. Getting this wrong (as the original polling code did)
+doesn't throw - `Object.keys()` on a raw string just silently iterates its
+*characters* instead of toy entries, which is a very confusing bug to chase
+since everything still "runs."
 
 The original `GetToys`-polling approach is kept as a fallback for whenever
 the socket isn't confirmed connected yet (right after launch, or while a
@@ -316,10 +358,13 @@ standalone always-pink-by-default setting a preset tap never overwrites.
 
 Custom reveals the same swatch pickers as before, now with more options per
 row (7-8 instead of 4-6) after the "give more freedom, keep white/black/an
-off-white as anchors" request. Lovense pink (`#e4007c`, a reasonable but
-unverified approximation of their brand color) is available both as a
-one-tap preset and as a standalone swatch in the bezel/background/text rows,
-so it can be mixed with any other color too.
+off-white as anchors" request. Lovense pink (`#FF2D89`, confirmed against
+Lovense's own site — both the built-in preset's bezel and the active-color
+swatch row now use this same value, replacing two earlier different guesses)
+is available both as a one-tap preset and as a standalone swatch in the
+bezel/background/text rows, so it can be mixed with any other color too.
+It's also this app's **default** color scheme on a fresh install, on both
+display styles, before Settings has ever been opened.
 
 Custom also has a **"Save as preset"** flow: name the current bezel/
 background/text combo and it's appended to the Presets grid with a delete
@@ -374,16 +419,12 @@ idle state either way — only the hand's *position* is disguised, the same
 principle 1a's digit-swap used, just expressed as hand angle now that
 there's no "seconds" digit to swap.
 
-**Basic mode**: the same 10-second idle timer swaps the tip text to a plain
-"Idle - press any button to wake" hint. This is a static swap, not a live
-countdown — the earlier mockup showed a ticking "reverts in Ns" style
-countdown, but that would need per-second ticks running in Basic mode too
-(defeating the point of only paying that battery cost in Discrete), so it
-was simplified to a one-shot state change instead.
-
-Both are driven by one shared `s_idle` flag and `reset_idle_timer()`, called
-from every real button handler (not from incoming AppMessages, which
-shouldn't count as "interaction").
+**Basic mode**: no idle behavior — removed after real-hardware feedback that
+it wasn't wanted there. Basic's tip text always shows the button-hint text
+(still briefly overridden by the unrelated 5s toy-name-reveal on hold-
+SELECT). `reset_idle_timer()` no longer even arms the underlying timer while
+Basic is active, since nothing in Basic reacts to `s_idle` anymore - the
+whole mechanism is Discrete-only now.
 
 ## Round display support (Chalk)
 
@@ -582,16 +623,11 @@ what's still untested on real hardware):
 - Preventing the same color being selected for text and background in
   Custom mode — a swatch pick that would collide with its paired field is
   rejected with an alert instead of applied.
-
-Still deferred - genuinely new work that deserves its own focused testing
-pass rather than being bundled further, given how fragile this specific
-hardware/toolchain combination has proven (see the `strtol()` writeup
-above):
-
 - A three-state toy-connection glyph (connecting/connected/disconnected)
-  instead of the current two-state one, to avoid the brief window right
+  instead of the original two-state one, to avoid the brief window right
   after launch where "connected" is shown optimistically before the first
-  real check completes.
+  real check completes — also re-shown if the toy-events socket drops
+  mid-session and a reconnect is pending, not just at first launch.
 
 Other ideas:
 - Persist the selected pattern and toy with `persist_write_int`/a small

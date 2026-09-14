@@ -28,6 +28,11 @@
 #define BATTERY_SOURCE_WATCH 0
 #define BATTERY_SOURCE_TOY 1
 
+#define BT_STATE_CONNECTING 0
+#define BT_STATE_CONNECTED 1
+#define BT_STATE_DISCONNECTED 2
+#define BT_BLINK_INTERVAL_MS 650
+
 #define PERSIST_KEY_UI_STYLE 1
 #define PERSIST_KEY_BASIC_BG 2
 #define PERSIST_KEY_BASIC_TEXT 3
@@ -117,15 +122,19 @@ static bool s_active = false; // true = vibrating, false = paused
 static int s_ui_style = UI_STYLE_BASIC;
 static int s_discrete_face = DISCRETE_FACE_ANALOG;
 static int s_pattern = PATTERN_STEADY;
-static bool s_toy_connected = true; // optimistic until the phone reports otherwise
+static int s_bt_state = BT_STATE_CONNECTING; // optimistic-unknown until the first real signal
+static AppTimer *s_bt_blink_timer = NULL;
+static bool s_bt_blink_on = false;
 static char s_toy_name[24] = "All Toys";
 static int s_battery_source = BATTERY_SOURCE_WATCH;
 static int s_toy_battery = -1; // 0-100, or -1 = unknown (not persisted - meaningless until resent)
 
+// Idle behavior is Discrete-only now (the level hand/needle reverting to
+// real seconds while idle) - Basic mode no longer reacts to s_idle at all,
+// so reset_idle_timer() only arms the timer while Discrete is active.
 static bool s_idle = false; // true after IDLE_TIMEOUT_MS with no button press
 static AppTimer *s_idle_timer = NULL;
 #define IDLE_TIMEOUT_MS 10000
-#define IDLE_HINT_TEXT "Idle - press any\nbutton to wake"
 
 static GColor s_basic_bg_color;
 static GColor s_basic_text_color;
@@ -317,7 +326,7 @@ static void day_row_update_proc(Layer *layer, GContext *ctx) {
   int usable = bounds.size.w - 16;
   int day_width = usable / 7;
   int start_x = (bounds.size.w - usable) / 2;
-  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
 
   for (int i = 0; i < 7; i++) {
     GRect cell = GRect(start_x + i * day_width, 0, day_width, bounds.size.h);
@@ -329,20 +338,31 @@ static void day_row_update_proc(Layer *layer, GContext *ctx) {
 
 static void status_row_update_proc(Layer *layer, GContext *ctx) {
   // "BT" label (always muted - the dot alone carries the connection state)
-  // + a small status dot (muted=connected, red=lost, never the active pink)
-  // + right-aligned battery percentage. One layer instead of two TextLayers
-  // plus a separate dot element, positioned differently per face/platform
-  // by build_analog_face/build_chrono_face but drawn identically here.
+  // + a small status dot (connecting=blinking muted ring, connected=muted
+  // disc, disconnected=red disc, never the active pink) + right-aligned
+  // battery percentage. One layer instead of separate TextLayers plus a
+  // dot element, positioned differently per face/platform by
+  // build_analog_face/build_chrono_face but drawn identically here.
   GRect bounds = layer_get_bounds(layer);
-  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
 
   GRect bt_rect = GRect(0, 0, 40, bounds.size.h);
   graphics_context_set_text_color(ctx, s_discrete_muted_color);
   graphics_draw_text(ctx, "BT", font, bt_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  GPoint dot_center = GPoint(34, bounds.size.h / 2);
-  graphics_context_set_fill_color(ctx, s_toy_connected ? s_discrete_muted_color : GColorRed);
-  graphics_fill_circle(ctx, dot_center, 3);
+  // Dot sits tight against "BT", scaled to the label's cap height (1.6x the
+  // original 3px-radius/34px-offset geometry).
+  GPoint dot_center = GPoint(18, bounds.size.h / 2);
+  if (s_bt_state == BT_STATE_CONNECTING) {
+    if (s_bt_blink_on) {
+      graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
+      graphics_context_set_stroke_width(ctx, 2);
+      graphics_draw_circle(ctx, dot_center, 5);
+    }
+  } else {
+    graphics_context_set_fill_color(ctx, s_bt_state == BT_STATE_CONNECTED ? s_discrete_muted_color : GColorRed);
+    graphics_fill_circle(ctx, dot_center, 5);
+  }
 
   static char battery_buf[8];
   BatteryChargeState battery = battery_state_service_peek();
@@ -363,16 +383,16 @@ static void analog_hands_update_proc(Layer *layer, GContext *ctx) {
   int16_t quarter_w = 4, quarter_len = 10;
   int16_t hour_tick_w = 2, hour_tick_len = 6;
   int16_t hour_hand_w = 6, hour_hand_len = 36;
-  int16_t minute_hand_w = 4, minute_hand_len = 51;
-  int16_t level_hand_w = 2, level_hand_len = 55;
+  int16_t minute_hand_w = 6, minute_hand_len = 51;
+  int16_t level_hand_w = 4, level_hand_len = 55;
   int16_t cap_radius = 4;
 #else
   int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
   int16_t quarter_w = emery_px(4, k), quarter_len = emery_px(11, k);
   int16_t hour_tick_w = emery_px(2, k), hour_tick_len = emery_px(7, k);
   int16_t hour_hand_w = emery_px(7, k), hour_hand_len = emery_px(39, k);
-  int16_t minute_hand_w = emery_px(5, k), minute_hand_len = emery_px(55, k);
-  int16_t level_hand_w = emery_px(2, k), level_hand_len = emery_px(60, k);
+  int16_t minute_hand_w = emery_px(7, k), minute_hand_len = emery_px(55, k);
+  int16_t level_hand_w = emery_px(4, k), level_hand_len = emery_px(60, k);
   int16_t cap_radius = emery_px(4, k);
 #endif
 
@@ -421,14 +441,14 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
 #if defined(PBL_ROUND)
   int16_t tick_w = 2, tick_len = 5;
   int16_t tick_radius = 20;
-  int16_t needle_w = 3, needle_len = 19;
+  int16_t needle_w = 5, needle_len = 19;
   int16_t cap_radius = 3;
   uint8_t ring_stroke = 2;
 #else
   int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
   int16_t tick_w = emery_px(2, k), tick_len = emery_px(5, k);
   int16_t tick_radius = emery_px(21, k);
-  int16_t needle_w = emery_px(3, k), needle_len = emery_px(20, k);
+  int16_t needle_w = emery_px(5, k), needle_len = emery_px(20, k);
   int16_t cap_radius = emery_px(3, k);
   uint8_t ring_stroke = 2;
 #endif
@@ -515,6 +535,30 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
                              (int16_t)(bounds.size.h - underline_h), underline_w, underline_h);
     graphics_context_set_fill_color(ctx, color);
     graphics_fill_rect(ctx, underline, 0, GCornerNone);
+  }
+}
+
+static void bt_blink_handler(void *data) {
+  s_bt_blink_on = !s_bt_blink_on;
+  if (s_status_row_layer) {
+    layer_mark_dirty(s_status_row_layer);
+  }
+  s_bt_blink_timer = app_timer_register(BT_BLINK_INTERVAL_MS, bt_blink_handler, NULL);
+}
+
+static void stop_bt_blink(void) {
+  if (s_bt_blink_timer) {
+    app_timer_cancel(s_bt_blink_timer);
+    s_bt_blink_timer = NULL;
+  }
+}
+
+static void start_bt_blink_if_connecting(void) {
+  // Only meaningful while the status row actually exists - no timer churn
+  // while Basic mode is active.
+  if (s_bt_state == BT_STATE_CONNECTING && s_status_row_layer && !s_bt_blink_timer) {
+    s_bt_blink_on = true;
+    s_bt_blink_timer = app_timer_register(BT_BLINK_INTERVAL_MS, bt_blink_handler, NULL);
   }
 }
 
@@ -788,12 +832,10 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
 }
 
 static void apply_idle_state(void) {
-  if (s_tip_layer) {
-    text_layer_set_text(s_tip_layer, s_idle ? IDLE_HINT_TEXT : TIP_DEFAULT_TEXT);
-  }
-  // Only Discrete mode needs real per-second ticks (to sweep the level
-  // hand/needle through real seconds while idle) - Basic mode's idle hint
-  // doesn't need anything finer than the once-a-minute tick already running.
+  // Basic mode's tip layer no longer reacts to idle state - it always shows
+  // TIP_DEFAULT_TEXT (still temporarily overridden by the separate 5s
+  // toy-name-reveal timer). Only Discrete mode needs real per-second ticks
+  // (to sweep the level hand/needle through real seconds while idle).
   tick_timer_service_unsubscribe();
   bool need_seconds = s_idle && (s_ui_style == UI_STYLE_DISCRETE);
   tick_timer_service_subscribe(need_seconds ? SECOND_UNIT : MINUTE_UNIT, tick_handler);
@@ -818,7 +860,11 @@ static void reset_idle_timer(void) {
     s_idle = false;
     apply_idle_state();
   }
-  s_idle_timer = app_timer_register(IDLE_TIMEOUT_MS, idle_timeout_handler, NULL);
+  // Only Discrete mode has anything that reacts to idle state anymore -
+  // don't bother arming the timer at all while Basic is active.
+  if (s_ui_style == UI_STYLE_DISCRETE) {
+    s_idle_timer = app_timer_register(IDLE_TIMEOUT_MS, idle_timeout_handler, NULL);
+  }
 }
 
 static void send_command_msg(const char *command, int intensity) {
@@ -987,7 +1033,7 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
 #if defined(PBL_ROUND)
   s_tip_layer = text_layer_create(GRect(content_x + 4, content_h - 30, basic_width - 8, 28));
 #else
-  s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 42, basic_width - 4, 42));
+  s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 50, basic_width - 4, 42));
 #endif
   text_layer_set_background_color(s_tip_layer, GColorClear);
   text_layer_set_font(s_tip_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
@@ -1035,7 +1081,7 @@ static void teardown_basic_ui(void) {
 static void build_analog_face(GRect bounds) {
 #if defined(PBL_ROUND)
   GRect hands_frame = GRect(90 - 59, 90 - 59, 118, 118);
-  GRect date_frame = GRect(102, 83, 48, 15);
+  GRect date_frame = GRect(102, 83, 48, 19);
   GRect status_frame = GRect(55, 147, 70, 15);
 #else
   int32_t k = layout_scale_permille(bounds);
@@ -1043,7 +1089,7 @@ static void build_analog_face(GRect bounds) {
   int16_t cy = emery_px(120, k);
   int16_t r = emery_px(64, k);
   GRect hands_frame = GRect((int16_t)(cx - r), (int16_t)(cy - r), (int16_t)(2 * r), (int16_t)(2 * r));
-  GRect date_frame = GRect(0, emery_px(22, k), bounds.size.w, emery_px(17, k));
+  GRect date_frame = GRect(0, emery_px(22, k), bounds.size.w, emery_px(22, k));
   GRect status_frame = GRect(emery_px(30, k), emery_px(194, k), emery_px(140, k), emery_px(18, k));
 #endif
 
@@ -1054,7 +1100,7 @@ static void build_analog_face(GRect bounds) {
   s_date_layer = text_layer_create(date_frame);
   text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
-  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
 
@@ -1073,7 +1119,7 @@ static void build_chrono_face(GRect bounds) {
   int32_t k = layout_scale_permille(bounds);
   GRect status_frame = GRect(emery_px(10, k), emery_px(10, k),
                               (int16_t)(bounds.size.w - 2 * emery_px(10, k)), emery_px(18, k));
-  GRect day_row_frame = GRect(0, emery_px(34, k), bounds.size.w, 18);
+  GRect day_row_frame = GRect(0, emery_px(34, k), bounds.size.w, 24);
   GRect time_frame = GRect(0, emery_px(63, k), bounds.size.w, emery_px(46, k));
   GRect date_frame = GRect(0, emery_px(105, k), bounds.size.w, emery_px(18, k));
   GRect subdial_frame = GRect(emery_px(75, k), emery_px(126, k), emery_px(50, k), emery_px(50, k));
@@ -1100,7 +1146,9 @@ static void build_chrono_face(GRect bounds) {
   s_date_layer = text_layer_create(date_frame);
   text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
-  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  // Bold-at-current-size, not GOTHIC_18 - only ~3px clearance to the
+  // sub-dial below on both platforms, not enough room for the taller font.
+  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
 
@@ -1137,6 +1185,7 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   battery_state_service_subscribe(battery_handler);
   refresh_discrete_time();
   update_discrete_display();
+  start_bt_blink_if_connecting();
   log_heap("after build_discrete_ui");
 }
 
@@ -1148,6 +1197,7 @@ static void teardown_discrete_ui(void) {
     app_timer_cancel(s_toy_display_timer);
     s_toy_display_timer = NULL;
   }
+  stop_bt_blink();
   battery_state_service_unsubscribe();
 
   if (s_time_layer) {
@@ -1237,7 +1287,17 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
   Tuple *toy_connected_tuple = dict_find(iterator, MESSAGE_KEY_toy_connected);
   if (toy_connected_tuple) {
-    s_toy_connected = (bool)toy_connected_tuple->value->int32;
+    int raw = (int)toy_connected_tuple->value->int32;
+    // Map by named constant, not raw passthrough, so any unexpected value
+    // defaults to disconnected rather than silently misreading as connecting.
+    s_bt_state = (raw == BT_STATE_CONNECTING) ? BT_STATE_CONNECTING
+               : (raw == BT_STATE_CONNECTED) ? BT_STATE_CONNECTED
+               : BT_STATE_DISCONNECTED;
+    if (s_bt_state == BT_STATE_CONNECTING) {
+      start_bt_blink_if_connecting();
+    } else {
+      stop_bt_blink();
+    }
     update_toy_connection_glyph();
   }
 
@@ -1346,22 +1406,25 @@ static void init(void) {
   s_basic_text_color = persist_exists(PERSIST_KEY_BASIC_TEXT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_TEXT))
     : GColorBlack;
+  // Defaults match the "Lovense pink" preset, so a fresh install (before
+  // the phone ever resends colors, and before Settings has been opened)
+  // already looks like that preset rather than an arbitrary placeholder.
   s_basic_accent_color = persist_exists(PERSIST_KEY_BASIC_ACCENT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_BASIC_ACCENT))
-    : parse_hex_color("#e0245e");
+    : parse_hex_color("#ff2d89");
 
   s_discrete_bezel_color = persist_exists(PERSIST_KEY_DISCRETE_BEZEL)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_BEZEL))
-    : GColorDarkCandyAppleRed;
+    : parse_hex_color("#ff2d89");
   s_discrete_bg_color = persist_exists(PERSIST_KEY_DISCRETE_BG)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_BG))
-    : GColorPastelYellow;
+    : GColorWhite;
   s_discrete_text_color = persist_exists(PERSIST_KEY_DISCRETE_TEXT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_TEXT))
     : GColorBlack;
   s_discrete_active_color = persist_exists(PERSIST_KEY_DISCRETE_ACTIVE)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_ACTIVE))
-    : parse_hex_color("#ff0055");
+    : parse_hex_color("#ff2d89"); // Lovense pink, per Lovense's own site
 
   s_discrete_face = persist_exists(PERSIST_KEY_DISCRETE_FACE)
     ? persist_read_int(PERSIST_KEY_DISCRETE_FACE)
