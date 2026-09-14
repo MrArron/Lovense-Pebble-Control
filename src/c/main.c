@@ -7,6 +7,9 @@
 // parsing hex digits manually (hex_nibble/parse_hex_color below) instead of
 // using the C library at all. No more <stdlib.h>, no more strlen() either,
 // since that was the only other libc string function in this path.
+// strncpy/strftime/snprintf are fine - they're already proven working
+// elsewhere in this exact codebase on real hardware; only strtol/strlen were
+// the confirmed-broken ones.
 
 #define MAX_INTENSITY 20
 #define STEP 2
@@ -18,6 +21,13 @@
 
 #define UI_STYLE_BASIC 0
 #define UI_STYLE_DISCRETE 1
+
+#define DISCRETE_FACE_ANALOG 0
+#define DISCRETE_FACE_CHRONO 1
+
+#define BATTERY_SOURCE_WATCH 0
+#define BATTERY_SOURCE_TOY 1
+
 #define PERSIST_KEY_UI_STYLE 1
 #define PERSIST_KEY_BASIC_BG 2
 #define PERSIST_KEY_BASIC_TEXT 3
@@ -25,6 +35,9 @@
 #define PERSIST_KEY_DISCRETE_BEZEL 5
 #define PERSIST_KEY_DISCRETE_BG 6
 #define PERSIST_KEY_DISCRETE_TEXT 7
+#define PERSIST_KEY_DISCRETE_ACTIVE 8
+#define PERSIST_KEY_DISCRETE_FACE 9
+#define PERSIST_KEY_BATTERY_SOURCE 10
 
 #define TIP_DEFAULT_TEXT "Hold UP/DOWN\nto change pattern\nHold SELECT: toy"
 
@@ -39,7 +52,18 @@
 #define BASIC_BAR_SIZE 20 // width of the right-edge bar on rectangular displays
 #endif
 
+// Discrete-mode layout reference: the design spec's device-pixel numbers are
+// tuned for Pebble Time 2 (Emery), 200x228. On other rectangular platforms
+// (aplite/basalt/diorite, 144x168) every Emery-derived constant is scaled
+// down proportionally via layout_scale_permille()/emery_px() below, rather
+// than clipping - matching how frame_update_proc/day_row_update_proc already
+// degrade gracefully to any rectangular size instead of hardcoding one
+// platform. Chalk (round) uses its own hand-tuned numbers, unscaled.
+#define REF_W 200
+#define REF_H 228
+
 static const char *PATTERN_NAMES[PATTERN_COUNT] = { "STEADY", "PULSE", "WAVE" };
+static const char *PATTERN_ROMAN[PATTERN_COUNT] = { "I", "II", "III" };
 
 // Haptic confirmation when cycling patterns: buzz count matches position in
 // the list above (1 buzz = Steady, 2 = Pulse, 3 = Wave). Works identically
@@ -64,29 +88,39 @@ static TextLayer *s_intensity_layer;
 static TextLayer *s_status_layer;
 static TextLayer *s_pattern_layer;
 static TextLayer *s_tip_layer;
+static TextLayer *s_basic_toy_layer; // persistent "<toy name> - <battery>%" row
 static Layer *s_button_bar_layer; // vector-drawn chevrons/pause-play - no bitmaps, no ActionBarLayer
 
-// Discrete UI - looks like a plain minimalist watchface. Time and the
-// disguised intensity share a single row, like a real digital watch's
-// HH:MM:SS readout. Active/paused state is signaled only by that row's
-// color - no separate label anywhere. Same lazy build/teardown as Basic.
+// Discrete UI - looks like a plain analog or digital watchface (see
+// s_discrete_face). Vibration level is encoded only through hand/needle
+// position and color, never a digit - so unlike the old single Discrete
+// face, there's nothing here to "disguise" via idle digit-swapping. Same
+// lazy build/teardown as Basic. Not every pointer below is used by every
+// face/platform combination - build_discrete_ui only creates what the
+// current face+platform need, and teardown_discrete_ui destroys whichever
+// of these are non-NULL.
 static Layer *s_discrete_container;
 static Layer *s_frame_layer;
-static Layer *s_day_row_layer; // one layer drawing all 7 letters, not 7 TextLayers
-static TextLayer *s_time_layer;
-static TextLayer *s_date_layer;
-static TextLayer *s_toy_layer; // brief 5s reveal of the selected toy on cycling
-static TextLayer *s_battery_layer;
-static TextLayer *s_bt_layer;
+static Layer *s_day_row_layer;    // 1d/rect only - reuses the one-layer-7-letters trick
+static Layer *s_status_row_layer; // both faces - "BT" label + status dot + battery, one layer
+static Layer *s_hands_layer;      // 1b only - ticks + hour/minute/level hands + cap
+static Layer *s_subdial_layer;    // 1d only - ring + ticks + needle + cap
+static Layer *s_register_layer;   // 1d/rect only - Steady/Pulse/Wave totalizer
+static TextLayer *s_time_layer;   // 1d only - digital "HH:MM"
+static TextLayer *s_date_layer;   // both faces - also doubles as the toy-name reveal target
+static char s_date_text[24] = ""; // last real date string, restored after a toy-name reveal
+static AppTimer *s_toy_display_timer = NULL;
+static int s_current_wday = 0; // 0=Sunday, read by the day-row draw callback
 
 static int s_intensity = 0;
 static bool s_active = false; // true = vibrating, false = paused
 static int s_ui_style = UI_STYLE_BASIC;
+static int s_discrete_face = DISCRETE_FACE_ANALOG;
 static int s_pattern = PATTERN_STEADY;
 static bool s_toy_connected = true; // optimistic until the phone reports otherwise
 static char s_toy_name[24] = "All Toys";
-static AppTimer *s_toy_display_timer = NULL;
-static int s_current_wday = 0; // 0=Sunday, read by the day-row draw callback
+static int s_battery_source = BATTERY_SOURCE_WATCH;
+static int s_toy_battery = -1; // 0-100, or -1 = unknown (not persisted - meaningless until resent)
 
 static bool s_idle = false; // true after IDLE_TIMEOUT_MS with no button press
 static AppTimer *s_idle_timer = NULL;
@@ -97,17 +131,17 @@ static GColor s_basic_bg_color;
 static GColor s_basic_text_color;
 static GColor s_basic_accent_color;
 static GColor s_basic_pattern_color; // computed - accent blended toward text, for readability on dark accents
-static GColor s_discrete_bezel_color;
-static GColor s_discrete_bg_color;
+static GColor s_discrete_bezel_color;  // "bg" role in the design spec - bezel/outside-the-face color
+static GColor s_discrete_bg_color;     // "face" role in the design spec - dial/card background
 static GColor s_discrete_text_color;
-static GColor s_discrete_muted_color; // computed - text blended toward background, for secondary elements
-
-static const GColor COLOR_TIME_ACTIVE = GColorRed; // fixed - this is the disguise's state signal
+static GColor s_discrete_muted_color;  // computed - blend(face, text), for secondary elements
+static GColor s_discrete_active_color; // vibrating-state signal color, default Lovense pink, independent of presets
 
 static const char *WEEKDAY_LETTERS[7] = { "S", "M", "T", "W", "T", "F", "S" };
 
 static void update_discrete_display(void);
 static void update_basic_display(void);
+static void update_basic_toy_row(void);
 static void click_config_provider(void *context);
 
 static void log_heap(const char *label) {
@@ -181,12 +215,73 @@ static void recompute_basic_pattern_color(void) {
   s_basic_pattern_color = blend_colors(s_basic_accent_color, s_basic_text_color);
 }
 
-// --- Discrete UI drawing ---
+// --- Discrete-mode geometry helpers ---
+
+// angle is in TRIG_MAX_ANGLE-scaled units, 0 = straight up (12 o'clock),
+// increasing clockwise - the standard Pebble watch-hand convention.
+static int32_t angle_for_fraction(int32_t numerator, int32_t denominator) {
+  return (TRIG_MAX_ANGLE * numerator) / denominator;
+}
+
+// Conservative (min-of-both-axes) scale factor, in permille, of `bounds`
+// against the Emery reference size - always 1000 on real Emery hardware.
+static int32_t layout_scale_permille(GRect bounds) {
+  int32_t w_ratio = ((int32_t)bounds.size.w * 1000) / REF_W;
+  int32_t h_ratio = ((int32_t)bounds.size.h * 1000) / REF_H;
+  return (w_ratio < h_ratio) ? w_ratio : h_ratio;
+}
+
+static int16_t emery_px(int16_t px, int32_t permille) {
+  int16_t v = (int16_t)(((int32_t)px * permille) / 1000);
+  return v > 0 ? v : 1; // never let a scaled width/length collapse to 0
+}
+
+// Fills a rectangle of the given width, spanning from `inner_offset` to
+// `inner_offset + length` along the axis rotated `angle` clockwise from
+// straight up, pivoting at `pivot`. inner_offset=0 => one end sits exactly
+// on the pivot (hands, needles). inner_offset = radius - len => a short
+// segment near the rim (ticks), never reaching the pivot.
+static void draw_rotated_rect(GContext *ctx, GPoint pivot, int32_t angle,
+                               int16_t width, int16_t inner_offset,
+                               int16_t length, GColor color) {
+  int32_t s = sin_lookup(angle);
+  int32_t c = cos_lookup(angle);
+  int16_t half_w = width / 2;
+  int16_t near = inner_offset;
+  int16_t far = inner_offset + length;
+
+  GPoint near_c = {
+    .x = (int16_t)(pivot.x + (s * near) / TRIG_MAX_RATIO),
+    .y = (int16_t)(pivot.y - (c * near) / TRIG_MAX_RATIO),
+  };
+  GPoint far_c = {
+    .x = (int16_t)(pivot.x + (s * far) / TRIG_MAX_RATIO),
+    .y = (int16_t)(pivot.y - (c * far) / TRIG_MAX_RATIO),
+  };
+  int16_t perp_x = (int16_t)((c * half_w) / TRIG_MAX_RATIO);
+  int16_t perp_y = (int16_t)((s * half_w) / TRIG_MAX_RATIO);
+
+  GPoint pts[4] = {
+    { (int16_t)(near_c.x - perp_x), (int16_t)(near_c.y - perp_y) },
+    { (int16_t)(near_c.x + perp_x), (int16_t)(near_c.y + perp_y) },
+    { (int16_t)(far_c.x  + perp_x), (int16_t)(far_c.y  + perp_y) },
+    { (int16_t)(far_c.x  - perp_x), (int16_t)(far_c.y  - perp_y) },
+  };
+  GPathInfo info = { .num_points = 4, .points = pts };
+  GPath *path = gpath_create(&info);
+  graphics_context_set_fill_color(ctx, color);
+  gpath_draw_filled(ctx, path);
+  gpath_destroy(path);
+}
+
+// --- Discrete UI drawing: shared elements ---
 
 static void frame_update_proc(Layer *layer, GContext *ctx) {
-  // Draws the LCD fill and bezel as one opaque layer, so it doubles as the
+  // Draws the face fill and bezel as one opaque layer, so it doubles as the
   // background for everything else in Discrete mode. Both colors come from
-  // the phone's settings page.
+  // the phone's settings page. Already matches the 1b/1d design spec's bezel
+  // geometry exactly (inset 8px device, corner radius 13px device on
+  // rectangular platforms) - carried over unchanged from the original face.
   GRect bounds = layer_get_bounds(layer);
   graphics_context_set_fill_color(ctx, s_discrete_bezel_color);
 #if defined(PBL_ROUND)
@@ -201,11 +296,10 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
   int16_t radius = (bounds.size.w / 2) - 6;
   graphics_fill_circle(ctx, center, radius);
 #else
-  // Flush to the true screen edge (small radius) rather than the old large
-  // outer rounding, which left the background color visible in the real
-  // corners on rectangular hardware. The inner curve is unchanged. Border
-  // thickness widened from 4 to 8 to better match the intended visual
-  // weight - 4px read as a thin outline on real hardware, not a bezel.
+  // Flush to the true screen edge (small radius) rather than a large outer
+  // rounding, which left the background color visible in the real corners
+  // on rectangular hardware. Border thickness matches the 8px device inset
+  // the design spec calls for on both new faces.
   graphics_fill_rect(ctx, bounds, 4, GCornersAll);
   GRect inner = GRect(bounds.origin.x + 8, bounds.origin.y + 8,
                        bounds.size.w - 16, bounds.size.h - 16);
@@ -216,13 +310,11 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
 
 static void day_row_update_proc(Layer *layer, GContext *ctx) {
   // Draws all 7 weekday letters in one layer instead of 7 separate
-  // TextLayers - same visual result, far fewer allocated objects.
+  // TextLayers - same visual result, far fewer allocated objects. Reused by
+  // 1d on rectangular platforms only (1b has no day row; Chalk drops it on
+  // both faces for lack of vertical room).
   GRect bounds = layer_get_bounds(layer);
-#if defined(PBL_ROUND)
-  int usable = bounds.size.w - 40; // extra inset - a circle has less width away from center
-#else
   int usable = bounds.size.w - 16;
-#endif
   int day_width = usable / 7;
   int start_x = (bounds.size.w - usable) / 2;
   GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
@@ -235,35 +327,207 @@ static void day_row_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
-static void update_status_glyphs(void) {
-  if (!s_battery_layer) {
-    return;
-  }
-  BatteryChargeState battery = battery_state_service_peek();
+static void status_row_update_proc(Layer *layer, GContext *ctx) {
+  // "BT" label (always muted - the dot alone carries the connection state)
+  // + a small status dot (muted=connected, red=lost, never the active pink)
+  // + right-aligned battery percentage. One layer instead of two TextLayers
+  // plus a separate dot element, positioned differently per face/platform
+  // by build_analog_face/build_chrono_face but drawn identically here.
+  GRect bounds = layer_get_bounds(layer);
+  GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+
+  GRect bt_rect = GRect(0, 0, 40, bounds.size.h);
+  graphics_context_set_text_color(ctx, s_discrete_muted_color);
+  graphics_draw_text(ctx, "BT", font, bt_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+  GPoint dot_center = GPoint(34, bounds.size.h / 2);
+  graphics_context_set_fill_color(ctx, s_toy_connected ? s_discrete_muted_color : GColorRed);
+  graphics_fill_circle(ctx, dot_center, 3);
+
   static char battery_buf[8];
+  BatteryChargeState battery = battery_state_service_peek();
   snprintf(battery_buf, sizeof(battery_buf), "%d%%", battery.charge_percent);
-  text_layer_set_text(s_battery_layer, battery_buf);
+  GRect batt_rect = GRect(bounds.size.w - 50, 0, 50, bounds.size.h);
+  graphics_context_set_text_color(ctx, s_discrete_muted_color);
+  graphics_draw_text(ctx, battery_buf, font, batt_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 }
 
-static void battery_handler(BatteryChargeState state) {
-  update_status_glyphs();
+// --- Face 1b: Analog dial ---
+
+static void analog_hands_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  GPoint center = grect_center_point(&bounds);
+  int16_t tick_radius = bounds.size.w / 2; // the layer is sized to exactly 2*tick_radius
+
+#if defined(PBL_ROUND)
+  int16_t quarter_w = 4, quarter_len = 10;
+  int16_t hour_tick_w = 2, hour_tick_len = 6;
+  int16_t hour_hand_w = 6, hour_hand_len = 36;
+  int16_t minute_hand_w = 4, minute_hand_len = 51;
+  int16_t level_hand_w = 2, level_hand_len = 55;
+  int16_t cap_radius = 4;
+#else
+  int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+  int16_t quarter_w = emery_px(4, k), quarter_len = emery_px(11, k);
+  int16_t hour_tick_w = emery_px(2, k), hour_tick_len = emery_px(7, k);
+  int16_t hour_hand_w = emery_px(7, k), hour_hand_len = emery_px(39, k);
+  int16_t minute_hand_w = emery_px(5, k), minute_hand_len = emery_px(55, k);
+  int16_t level_hand_w = emery_px(2, k), level_hand_len = emery_px(60, k);
+  int16_t cap_radius = emery_px(4, k);
+#endif
+
+  // Quarter ticks (0/90/180/270deg) in text; the other 8 hour ticks in muted.
+  for (int q = 0; q < 4; q++) {
+    draw_rotated_rect(ctx, center, angle_for_fraction(q, 4), quarter_w,
+                       tick_radius - quarter_len, quarter_len, s_discrete_text_color);
+  }
+  for (int hr = 0; hr < 12; hr++) {
+    if (hr % 3 == 0) {
+      continue; // already drawn as a quarter tick above
+    }
+    draw_rotated_rect(ctx, center, angle_for_fraction(hr, 12), hour_tick_w,
+                       tick_radius - hour_tick_len, hour_tick_len, s_discrete_muted_color);
+  }
+
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  int hour12 = t->tm_hour % 12;
+  int32_t hour_angle = angle_for_fraction(hour12 * 60 + t->tm_min, 12 * 60);
+  int32_t minute_angle = angle_for_fraction(t->tm_min, 60);
+  draw_rotated_rect(ctx, center, hour_angle, hour_hand_w, 0, hour_hand_len, s_discrete_text_color);
+  draw_rotated_rect(ctx, center, minute_angle, minute_hand_w, 0, minute_hand_len, s_discrete_text_color);
+
+  // Level hand: while idle it reverts to true elapsed seconds (an ordinary
+  // running second hand); the instant a button is pressed (s_idle clears)
+  // it snaps to the vibration-level position instead. Color always reflects
+  // vibration state regardless of idle - only position is disguised.
+  int32_t level_angle = s_idle
+    ? angle_for_fraction(t->tm_sec, 60)
+    : angle_for_fraction(s_intensity, 20); // level*18deg == level/20 of a full turn
+  GColor level_color = s_active ? s_discrete_active_color : s_discrete_muted_color;
+  draw_rotated_rect(ctx, center, level_angle, level_hand_w, 0, level_hand_len, level_color);
+
+  graphics_context_set_fill_color(ctx, s_discrete_text_color);
+  graphics_fill_circle(ctx, center, cap_radius);
+}
+
+// --- Face 1d: Chrono sub-dial ---
+
+static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  GPoint center = grect_center_point(&bounds);
+  int16_t ring_radius = bounds.size.w / 2;
+
+#if defined(PBL_ROUND)
+  int16_t tick_w = 2, tick_len = 5;
+  int16_t tick_radius = 20;
+  int16_t needle_w = 3, needle_len = 19;
+  int16_t cap_radius = 3;
+  uint8_t ring_stroke = 2;
+#else
+  int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+  int16_t tick_w = emery_px(2, k), tick_len = emery_px(5, k);
+  int16_t tick_radius = emery_px(21, k);
+  int16_t needle_w = emery_px(3, k), needle_len = emery_px(20, k);
+  int16_t cap_radius = emery_px(3, k);
+  uint8_t ring_stroke = 2;
+#endif
+
+  // Ring: muted whenever not vibrating (paused, at any level), active while
+  // vibrating - matches the spec's "muted when paused/level0" (both cases
+  // read the same on the ring, unlike the needle which distinguishes them).
+  GColor ring_color = s_active ? s_discrete_active_color : s_discrete_muted_color;
+  GColor needle_color = s_active
+    ? s_discrete_active_color
+    : (s_intensity == 0 ? s_discrete_muted_color : s_discrete_text_color);
+  GColor cap_color = (s_intensity == 0) ? s_discrete_muted_color : s_discrete_text_color;
+
+  graphics_context_set_stroke_color(ctx, ring_color);
+  graphics_context_set_stroke_width(ctx, ring_stroke);
+  graphics_draw_circle(ctx, center, ring_radius);
+
+  for (int q = 0; q < 4; q++) {
+    draw_rotated_rect(ctx, center, angle_for_fraction(q, 4), tick_w,
+                       tick_radius - tick_len, tick_len, s_discrete_muted_color);
+  }
+
+  // Needle: true elapsed seconds while idle (reads as an ordinary running
+  // chronograph seconds sub-dial), vibration-level position otherwise -
+  // same idle/level split as 1b's hand, same color-independent-of-idle rule.
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  int32_t needle_angle = s_idle
+    ? angle_for_fraction(t->tm_sec, 60)
+    : angle_for_fraction(s_intensity, 20);
+  draw_rotated_rect(ctx, center, needle_angle, needle_w, 0, needle_len, needle_color);
+
+  graphics_context_set_fill_color(ctx, cap_color);
+  graphics_fill_circle(ctx, center, cap_radius);
+}
+
+static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
+  // Three columns (Steady/Pulse/Wave as I/II/III), space-between, reading
+  // as a chrono totalizer. Only the currently selected pattern gets a
+  // marker triangle + bold numeral + long underline; at level 0 nothing is
+  // marked (all three muted, no triangle), per spec.
+  GRect bounds = layer_get_bounds(layer);
+  int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+  int16_t col_w = emery_px(26, k);
+  int16_t tri_w = emery_px(7, k), tri_h = emery_px(4, k);
+  int16_t underline_sel_w = emery_px(14, k), underline_sel_h = emery_px(2, k);
+  int16_t underline_unsel_w = emery_px(8, k), underline_unsel_h = emery_px(1, k);
+  int16_t gap = emery_px(2, k);
+
+  GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+  GFont regular_font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  bool any_selected = s_intensity > 0;
+
+  for (int i = 0; i < PATTERN_COUNT; i++) {
+    bool selected = any_selected && (i == s_pattern);
+    GColor color = selected ? s_discrete_text_color : s_discrete_muted_color;
+    int16_t col_x = (i == 0) ? 0
+                   : (i == PATTERN_COUNT - 1) ? (bounds.size.w - col_w)
+                   : (bounds.size.w - col_w) / 2;
+    int16_t y = 0;
+
+    if (selected) {
+      GPoint tri_pts[3] = {
+        { (int16_t)(col_x + col_w / 2 - tri_w / 2), y },
+        { (int16_t)(col_x + col_w / 2 + tri_w / 2), y },
+        { (int16_t)(col_x + col_w / 2), (int16_t)(y + tri_h) },
+      };
+      GPathInfo tri_info = { .num_points = 3, .points = tri_pts };
+      GPath *tri = gpath_create(&tri_info);
+      graphics_context_set_fill_color(ctx, s_discrete_text_color);
+      gpath_draw_filled(ctx, tri);
+      gpath_destroy(tri);
+      y = (int16_t)(y + tri_h + gap);
+    }
+
+    GRect numeral_rect = GRect(col_x, y, col_w, 20);
+    graphics_context_set_text_color(ctx, color);
+    graphics_draw_text(ctx, PATTERN_ROMAN[i], selected ? bold_font : regular_font,
+                        numeral_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+
+    int16_t underline_w = selected ? underline_sel_w : underline_unsel_w;
+    int16_t underline_h = selected ? underline_sel_h : underline_unsel_h;
+    GRect underline = GRect((int16_t)(col_x + (col_w - underline_w) / 2),
+                             (int16_t)(bounds.size.h - underline_h), underline_w, underline_h);
+    graphics_context_set_fill_color(ctx, color);
+    graphics_fill_rect(ctx, underline, 0, GCornerNone);
+  }
 }
 
 static void update_toy_connection_glyph(void) {
-  // Repurposes the corner glyph to show whether the Lovense toy is still
-  // connected to the phone (reported by index.js), not the watch's own
-  // Bluetooth link - that's a separate, less actionable piece of state.
-  if (!s_bt_layer) {
-    return;
+  if (s_status_row_layer) {
+    layer_mark_dirty(s_status_row_layer);
   }
-  text_layer_set_text(s_bt_layer, "BT");
-  text_layer_set_text_color(s_bt_layer, s_toy_connected ? s_discrete_muted_color : s_discrete_bezel_color);
 }
 
 static void toy_display_timeout_handler(void *data) {
   s_toy_display_timer = NULL;
-  if (s_toy_layer) {
-    text_layer_set_text(s_toy_layer, "");
+  if (s_date_layer) {
+    text_layer_set_text(s_date_layer, s_date_text);
   }
   if (s_tip_layer) {
     text_layer_set_text(s_tip_layer, TIP_DEFAULT_TEXT);
@@ -271,8 +535,11 @@ static void toy_display_timeout_handler(void *data) {
 }
 
 static void show_toy_name_briefly(void) {
-  if (s_toy_layer) {
-    text_layer_set_text(s_toy_layer, s_toy_name);
+  // Discrete mode has no dedicated toy-reveal element in the new layouts
+  // (the design spec's mockups don't include one) - reuses the date layer
+  // for the same brief-reveal-then-restore behavior the original face had.
+  if (s_date_layer) {
+    text_layer_set_text(s_date_layer, s_toy_name);
   }
   if (s_tip_layer) {
     text_layer_set_text(s_tip_layer, s_toy_name);
@@ -281,6 +548,7 @@ static void show_toy_name_briefly(void) {
     app_timer_cancel(s_toy_display_timer);
   }
   s_toy_display_timer = app_timer_register(5000, toy_display_timeout_handler, NULL);
+  update_basic_toy_row();
 }
 
 // --- Basic UI drawing ---
@@ -373,6 +641,7 @@ static void apply_basic_colors(void) {
   text_layer_set_text_color(s_status_layer, s_basic_text_color);
   text_layer_set_text_color(s_tip_layer, s_basic_text_color);
   text_layer_set_text_color(s_pattern_layer, s_basic_pattern_color);
+  text_layer_set_text_color(s_basic_toy_layer, s_basic_text_color);
   layer_mark_dirty(s_button_bar_layer);
 }
 
@@ -381,15 +650,31 @@ static void apply_discrete_colors(void) {
   if (s_ui_style == UI_STYLE_DISCRETE) {
     window_set_background_color(s_window, s_discrete_bg_color);
   }
-  if (!s_time_layer) {
+  if (!s_discrete_container) {
     return; // Discrete UI isn't currently built - just persisted for next time.
   }
-  text_layer_set_text_color(s_toy_layer, s_discrete_text_color);
-  text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
-  update_toy_connection_glyph();
   layer_mark_dirty(s_frame_layer);
-  layer_mark_dirty(s_day_row_layer);
-  update_discrete_display();
+  if (s_day_row_layer) {
+    layer_mark_dirty(s_day_row_layer);
+  }
+  if (s_status_row_layer) {
+    layer_mark_dirty(s_status_row_layer);
+  }
+  if (s_hands_layer) {
+    layer_mark_dirty(s_hands_layer);
+  }
+  if (s_subdial_layer) {
+    layer_mark_dirty(s_subdial_layer);
+  }
+  if (s_register_layer) {
+    layer_mark_dirty(s_register_layer);
+  }
+  if (s_date_layer) {
+    text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
+  }
+  if (s_time_layer) {
+    text_layer_set_text_color(s_time_layer, s_discrete_text_color);
+  }
 }
 
 static void update_basic_display(void) {
@@ -404,11 +689,45 @@ static void update_basic_display(void) {
   layer_mark_dirty(s_button_bar_layer);
 }
 
-static void update_discrete_display(void) {
-  if (!s_time_layer) {
+static void update_basic_toy_row(void) {
+  if (!s_basic_toy_layer) {
     return;
   }
-  text_layer_set_text_color(s_time_layer, s_active ? COLOR_TIME_ACTIVE : s_discrete_text_color);
+  int pct;
+  if (s_battery_source == BATTERY_SOURCE_TOY) {
+    pct = s_toy_battery;
+  } else {
+    BatteryChargeState battery = battery_state_service_peek();
+    pct = battery.charge_percent;
+  }
+  static char row_buf[40];
+  if (pct >= 0) {
+    snprintf(row_buf, sizeof(row_buf), "%s - %d%%", s_toy_name, pct);
+  } else {
+    snprintf(row_buf, sizeof(row_buf), "%s - --", s_toy_name);
+  }
+  text_layer_set_text(s_basic_toy_layer, row_buf);
+}
+
+static void update_discrete_display(void) {
+  // Level/pattern/active-state changes redraw immediately from here - no
+  // timer needed, since idle-vs-active is the only thing that ever needs a
+  // per-second refresh (handled by apply_idle_state's SECOND_UNIT ticking).
+  if (!s_discrete_container) {
+    return;
+  }
+  if (s_discrete_face == DISCRETE_FACE_ANALOG) {
+    if (s_hands_layer) {
+      layer_mark_dirty(s_hands_layer);
+    }
+  } else {
+    if (s_subdial_layer) {
+      layer_mark_dirty(s_subdial_layer);
+    }
+    if (s_register_layer) {
+      layer_mark_dirty(s_register_layer);
+    }
+  }
 }
 
 static void update_display(void) {
@@ -422,24 +741,40 @@ static void update_time_display(struct tm *tick_time) {
     layer_mark_dirty(s_day_row_layer);
   }
 
-  if (!s_time_layer) {
+  if (!s_discrete_container) {
     return;
   }
-  // One combined row, formatted like a real HH:MM:SS readout - the last two
-  // digits are the intensity, not real seconds. Once idle for 10s, the last
-  // two digits switch to the real, ticking seconds instead, indistinguishable
-  // from an ordinary watchface at rest.
-  static char time_buf[16];
-  static char date_buf[16];
-  const char *time_fmt = clock_is_24h_style() ? "%H:%M:" : "%I:%M:";
 
-  size_t prefix_len = strftime(time_buf, sizeof(time_buf), time_fmt, tick_time);
-  int seconds_field = s_idle ? tick_time->tm_sec : s_intensity;
-  snprintf(time_buf + prefix_len, sizeof(time_buf) - prefix_len, "%02d", seconds_field);
-  text_layer_set_text(s_time_layer, time_buf);
+  static char date_buf[24];
+  if (s_discrete_face == DISCRETE_FACE_ANALOG) {
+    strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
+  } else {
+    strftime(date_buf, sizeof(date_buf), "%a %d %b", tick_time);
+  }
+  strncpy(s_date_text, date_buf, sizeof(s_date_text) - 1);
+  s_date_text[sizeof(s_date_text) - 1] = '\0';
+  if (s_date_layer && !s_toy_display_timer) { // don't clobber an active toy-name reveal
+    text_layer_set_text(s_date_layer, s_date_text);
+  }
 
-  strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
-  text_layer_set_text(s_date_layer, date_buf);
+  if (s_discrete_face == DISCRETE_FACE_CHRONO && s_time_layer) {
+    static char time_buf[16];
+    const char *time_fmt = clock_is_24h_style() ? "%H:%M" : "%I:%M";
+    strftime(time_buf, sizeof(time_buf), time_fmt, tick_time);
+    text_layer_set_text(s_time_layer, time_buf);
+  }
+
+  // The level indicator (1b's hand / 1d's needle) needs a redraw on every
+  // tick too, since while idle it sweeps real seconds.
+  if (s_discrete_face == DISCRETE_FACE_ANALOG) {
+    if (s_hands_layer) {
+      layer_mark_dirty(s_hands_layer);
+    }
+  } else {
+    if (s_subdial_layer) {
+      layer_mark_dirty(s_subdial_layer);
+    }
+  }
 }
 
 static void refresh_discrete_time(void) {
@@ -456,9 +791,9 @@ static void apply_idle_state(void) {
   if (s_tip_layer) {
     text_layer_set_text(s_tip_layer, s_idle ? IDLE_HINT_TEXT : TIP_DEFAULT_TEXT);
   }
-  // Only Discrete mode needs real per-second ticks (to show real seconds
-  // while idle) - Basic mode's idle hint doesn't need anything finer than
-  // the once-a-minute tick already running.
+  // Only Discrete mode needs real per-second ticks (to sweep the level
+  // hand/needle through real seconds while idle) - Basic mode's idle hint
+  // doesn't need anything finer than the once-a-minute tick already running.
   tick_timer_service_unsubscribe();
   bool need_seconds = s_idle && (s_ui_style == UI_STYLE_DISCRETE);
   tick_timer_service_subscribe(need_seconds ? SECOND_UNIT : MINUTE_UNIT, tick_handler);
@@ -473,8 +808,8 @@ static void idle_timeout_handler(void *data) {
 
 static void reset_idle_timer(void) {
   // Called on every real button press - cancels any pending idle timeout
-  // and, if we were already idle, immediately reverts to the disguised
-  // display before starting a fresh 10s countdown.
+  // and, if we were already idle, immediately reverts to the vibration-
+  // level display before starting a fresh 10s countdown.
   if (s_idle_timer) {
     app_timer_cancel(s_idle_timer);
     s_idle_timer = NULL;
@@ -588,6 +923,13 @@ static void click_config_provider(void *context) {
   window_long_click_subscribe(BUTTON_ID_SELECT, 700, select_long_click_handler, NULL);
 }
 
+static void battery_handler(BatteryChargeState state) {
+  if (s_status_row_layer) {
+    layer_mark_dirty(s_status_row_layer);
+  }
+  update_basic_toy_row();
+}
+
 // --- Lazy per-style UI construction: only the active style's layers exist
 // in memory at any time. Switching styles tears down the old one and builds
 // the new one, instead of creating both up front and just hiding one. ---
@@ -614,6 +956,12 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
 
   s_basic_container = layer_create(bounds);
   layer_add_child(window_layer, s_basic_container);
+
+  s_basic_toy_layer = text_layer_create(GRect(content_x, 2, basic_width, 16));
+  text_layer_set_background_color(s_basic_toy_layer, GColorClear);
+  text_layer_set_font(s_basic_toy_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_basic_toy_layer, GTextAlignmentCenter);
+  layer_add_child(s_basic_container, text_layer_get_layer(s_basic_toy_layer));
 
   s_intensity_layer = text_layer_create(GRect(content_x, content_h / 2 - 60, basic_width, 54));
   text_layer_set_background_color(s_intensity_layer, GColorClear);
@@ -655,8 +1003,10 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
   layer_set_update_proc(s_button_bar_layer, button_bar_update_proc);
   layer_add_child(s_basic_container, s_button_bar_layer);
 
+  battery_state_service_subscribe(battery_handler);
   apply_basic_colors();
   update_basic_display();
+  update_basic_toy_row();
   log_heap("after build_basic_ui");
 }
 
@@ -664,6 +1014,7 @@ static void teardown_basic_ui(void) {
   if (!s_basic_container) {
     return; // not built
   }
+  battery_state_service_unsubscribe();
   text_layer_destroy(s_intensity_layer);
   s_intensity_layer = NULL;
   text_layer_destroy(s_status_layer);
@@ -672,11 +1023,96 @@ static void teardown_basic_ui(void) {
   s_pattern_layer = NULL;
   text_layer_destroy(s_tip_layer);
   s_tip_layer = NULL;
+  text_layer_destroy(s_basic_toy_layer);
+  s_basic_toy_layer = NULL;
   layer_destroy(s_button_bar_layer);
   s_button_bar_layer = NULL;
   layer_destroy(s_basic_container);
   s_basic_container = NULL;
   log_heap("after teardown_basic_ui");
+}
+
+static void build_analog_face(GRect bounds) {
+#if defined(PBL_ROUND)
+  GRect hands_frame = GRect(90 - 59, 90 - 59, 118, 118);
+  GRect date_frame = GRect(102, 83, 48, 15);
+  GRect status_frame = GRect(55, 147, 70, 15);
+#else
+  int32_t k = layout_scale_permille(bounds);
+  int16_t cx = emery_px(100, k);
+  int16_t cy = emery_px(120, k);
+  int16_t r = emery_px(64, k);
+  GRect hands_frame = GRect((int16_t)(cx - r), (int16_t)(cy - r), (int16_t)(2 * r), (int16_t)(2 * r));
+  GRect date_frame = GRect(0, emery_px(22, k), bounds.size.w, emery_px(17, k));
+  GRect status_frame = GRect(emery_px(30, k), emery_px(194, k), emery_px(140, k), emery_px(18, k));
+#endif
+
+  s_hands_layer = layer_create(hands_frame);
+  layer_set_update_proc(s_hands_layer, analog_hands_update_proc);
+  layer_add_child(s_discrete_container, s_hands_layer);
+
+  s_date_layer = text_layer_create(date_frame);
+  text_layer_set_background_color(s_date_layer, GColorClear);
+  text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
+  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
+  layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
+
+  s_status_row_layer = layer_create(status_frame);
+  layer_set_update_proc(s_status_row_layer, status_row_update_proc);
+  layer_add_child(s_discrete_container, s_status_row_layer);
+}
+
+static void build_chrono_face(GRect bounds) {
+#if defined(PBL_ROUND)
+  GRect status_frame = GRect(50, 28, 80, 17);
+  GRect time_frame = GRect(0, 48, bounds.size.w, 42);
+  GRect date_frame = GRect(0, 91, bounds.size.w, 16);
+  GRect subdial_frame = GRect(65, 112, 50, 50);
+#else
+  int32_t k = layout_scale_permille(bounds);
+  GRect status_frame = GRect(emery_px(10, k), emery_px(10, k),
+                              (int16_t)(bounds.size.w - 2 * emery_px(10, k)), emery_px(18, k));
+  GRect day_row_frame = GRect(0, emery_px(34, k), bounds.size.w, 18);
+  GRect time_frame = GRect(0, emery_px(63, k), bounds.size.w, emery_px(46, k));
+  GRect date_frame = GRect(0, emery_px(105, k), bounds.size.w, emery_px(18, k));
+  GRect subdial_frame = GRect(emery_px(75, k), emery_px(126, k), emery_px(50, k), emery_px(50, k));
+  GRect register_frame = GRect(emery_px(55, k), emery_px(188, k), emery_px(90, k), emery_px(22, k));
+#endif
+
+#if !defined(PBL_ROUND)
+  s_day_row_layer = layer_create(day_row_frame);
+  layer_set_update_proc(s_day_row_layer, day_row_update_proc);
+  layer_add_child(s_discrete_container, s_day_row_layer);
+#endif
+
+  s_status_row_layer = layer_create(status_frame);
+  layer_set_update_proc(s_status_row_layer, status_row_update_proc);
+  layer_add_child(s_discrete_container, s_status_row_layer);
+
+  s_time_layer = text_layer_create(time_frame);
+  text_layer_set_background_color(s_time_layer, GColorClear);
+  text_layer_set_text_color(s_time_layer, s_discrete_text_color);
+  text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS));
+  text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
+  layer_add_child(s_discrete_container, text_layer_get_layer(s_time_layer));
+
+  s_date_layer = text_layer_create(date_frame);
+  text_layer_set_background_color(s_date_layer, GColorClear);
+  text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
+  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
+  layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
+
+  s_subdial_layer = layer_create(subdial_frame);
+  layer_set_update_proc(s_subdial_layer, chrono_subdial_update_proc);
+  layer_add_child(s_discrete_container, s_subdial_layer);
+
+#if !defined(PBL_ROUND)
+  s_register_layer = layer_create(register_frame);
+  layer_set_update_proc(s_register_layer, pattern_register_update_proc);
+  layer_add_child(s_discrete_container, s_register_layer);
+#endif
 }
 
 static void build_discrete_ui(Layer *window_layer, GRect bounds) {
@@ -685,19 +1121,6 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   }
   log_heap("before build_discrete_ui");
 
-  int center_y = bounds.size.h / 2;
-#if defined(PBL_ROUND)
-  int corner_margin = 30; // round screens need more horizontal clearance near the top
-#else
-  int corner_margin = 10;
-#endif
-  // BT/battery sit in the top corners (matching the original mockup), day
-  // row just below them. Time/date/toy are positioned relative to the true
-  // vertical center, now that the bottom of the screen isn't needed for
-  // status glyphs anymore.
-  int status_row_y = 10;
-  int day_row_y = 34;
-
   s_discrete_container = layer_create(bounds);
   layer_add_child(window_layer, s_discrete_container);
 
@@ -705,50 +1128,13 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
   layer_set_update_proc(s_frame_layer, frame_update_proc);
   layer_add_child(s_discrete_container, s_frame_layer);
 
-  s_day_row_layer = layer_create(GRect(0, day_row_y, bounds.size.w, 18));
-  layer_set_update_proc(s_day_row_layer, day_row_update_proc);
-  layer_add_child(s_discrete_container, s_day_row_layer);
-
-  s_bt_layer = text_layer_create(GRect(corner_margin, status_row_y, 40, 18));
-  text_layer_set_background_color(s_bt_layer, GColorClear);
-  text_layer_set_text_color(s_bt_layer, s_discrete_muted_color);
-  text_layer_set_font(s_bt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  layer_add_child(s_discrete_container, text_layer_get_layer(s_bt_layer));
-
-  s_battery_layer = text_layer_create(GRect(bounds.size.w - 40 - corner_margin, status_row_y, 40, 18));
-  text_layer_set_background_color(s_battery_layer, GColorClear);
-  text_layer_set_text_color(s_battery_layer, s_discrete_muted_color);
-  text_layer_set_font(s_battery_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_battery_layer, GTextAlignmentRight);
-  layer_add_child(s_discrete_container, text_layer_get_layer(s_battery_layer));
-
-  s_time_layer = text_layer_create(GRect(0, center_y - 25, bounds.size.w, 50));
-  text_layer_set_background_color(s_time_layer, GColorClear);
-  text_layer_set_text_color(s_time_layer, s_discrete_text_color);
-  text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS));
-  text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
-  text_layer_set_text(s_time_layer, "--:--:--");
-  layer_add_child(s_discrete_container, text_layer_get_layer(s_time_layer));
-
-  s_date_layer = text_layer_create(GRect(0, center_y + 28, bounds.size.w, 20));
-  text_layer_set_background_color(s_date_layer, GColorClear);
-  text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
-  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
-  text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
-  text_layer_set_text(s_date_layer, "");
-  layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
-
-  s_toy_layer = text_layer_create(GRect(0, center_y + 50, bounds.size.w, 18));
-  text_layer_set_background_color(s_toy_layer, GColorClear);
-  text_layer_set_text_color(s_toy_layer, s_discrete_text_color);
-  text_layer_set_font(s_toy_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-  text_layer_set_text_alignment(s_toy_layer, GTextAlignmentCenter);
-  text_layer_set_text(s_toy_layer, "");
-  layer_add_child(s_discrete_container, text_layer_get_layer(s_toy_layer));
+  if (s_discrete_face == DISCRETE_FACE_ANALOG) {
+    build_analog_face(bounds);
+  } else {
+    build_chrono_face(bounds);
+  }
 
   battery_state_service_subscribe(battery_handler);
-  update_status_glyphs();
-  update_toy_connection_glyph();
   refresh_discrete_time();
   update_discrete_display();
   log_heap("after build_discrete_ui");
@@ -764,18 +1150,34 @@ static void teardown_discrete_ui(void) {
   }
   battery_state_service_unsubscribe();
 
-  text_layer_destroy(s_time_layer);
-  s_time_layer = NULL;
-  text_layer_destroy(s_date_layer);
-  s_date_layer = NULL;
-  text_layer_destroy(s_toy_layer);
-  s_toy_layer = NULL;
-  text_layer_destroy(s_battery_layer);
-  s_battery_layer = NULL;
-  text_layer_destroy(s_bt_layer);
-  s_bt_layer = NULL;
-  layer_destroy(s_day_row_layer);
-  s_day_row_layer = NULL;
+  if (s_time_layer) {
+    text_layer_destroy(s_time_layer);
+    s_time_layer = NULL;
+  }
+  if (s_date_layer) {
+    text_layer_destroy(s_date_layer);
+    s_date_layer = NULL;
+  }
+  if (s_hands_layer) {
+    layer_destroy(s_hands_layer);
+    s_hands_layer = NULL;
+  }
+  if (s_subdial_layer) {
+    layer_destroy(s_subdial_layer);
+    s_subdial_layer = NULL;
+  }
+  if (s_register_layer) {
+    layer_destroy(s_register_layer);
+    s_register_layer = NULL;
+  }
+  if (s_day_row_layer) {
+    layer_destroy(s_day_row_layer);
+    s_day_row_layer = NULL;
+  }
+  if (s_status_row_layer) {
+    layer_destroy(s_status_row_layer);
+    s_status_row_layer = NULL;
+  }
   layer_destroy(s_frame_layer);
   s_frame_layer = NULL;
   layer_destroy(s_discrete_container);
@@ -805,6 +1207,17 @@ static void switch_ui_style(void) {
   reset_idle_timer();  // starts (or restarts) the 10s idle countdown
 }
 
+static void rebuild_discrete_face(void) {
+  if (s_ui_style != UI_STYLE_DISCRETE) {
+    return; // just persisted for next time Discrete becomes active
+  }
+  Layer *window_layer = window_get_root_layer(s_window);
+  GRect bounds = layer_get_bounds(window_layer);
+  teardown_discrete_ui();
+  build_discrete_ui(window_layer, bounds);
+  apply_idle_state();
+}
+
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
   log_heap("inbox_received_callback start");
 
@@ -813,6 +1226,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_ui_style = (int)ui_style_tuple->value->int32;
     persist_write_int(PERSIST_KEY_UI_STYLE, s_ui_style);
     switch_ui_style();
+  }
+
+  Tuple *discrete_face_tuple = dict_find(iterator, MESSAGE_KEY_discrete_face);
+  if (discrete_face_tuple) {
+    s_discrete_face = (int)discrete_face_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_DISCRETE_FACE, s_discrete_face);
+    rebuild_discrete_face();
   }
 
   Tuple *toy_connected_tuple = dict_find(iterator, MESSAGE_KEY_toy_connected);
@@ -826,6 +1246,19 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     strncpy(s_toy_name, toy_name_tuple->value->cstring, sizeof(s_toy_name) - 1);
     s_toy_name[sizeof(s_toy_name) - 1] = '\0';
     show_toy_name_briefly();
+  }
+
+  Tuple *toy_battery_tuple = dict_find(iterator, MESSAGE_KEY_toy_battery);
+  if (toy_battery_tuple) {
+    s_toy_battery = (int)toy_battery_tuple->value->int32;
+    update_basic_toy_row();
+  }
+
+  Tuple *battery_source_tuple = dict_find(iterator, MESSAGE_KEY_battery_source);
+  if (battery_source_tuple) {
+    s_battery_source = (int)battery_source_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_BATTERY_SOURCE, s_battery_source);
+    update_basic_toy_row();
   }
 
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
@@ -867,6 +1300,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   if (discrete_text_tuple) {
     s_discrete_text_color = parse_hex_color(discrete_text_tuple->value->cstring);
     persist_write_int(PERSIST_KEY_DISCRETE_TEXT, (int)packed_from_hex(discrete_text_tuple->value->cstring));
+    apply_discrete_colors();
+  }
+
+  Tuple *discrete_active_tuple = dict_find(iterator, MESSAGE_KEY_discrete_active_color);
+  if (discrete_active_tuple) {
+    s_discrete_active_color = parse_hex_color(discrete_active_tuple->value->cstring);
+    persist_write_int(PERSIST_KEY_DISCRETE_ACTIVE, (int)packed_from_hex(discrete_active_tuple->value->cstring));
     apply_discrete_colors();
   }
 
@@ -919,6 +1359,16 @@ static void init(void) {
   s_discrete_text_color = persist_exists(PERSIST_KEY_DISCRETE_TEXT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_TEXT))
     : GColorBlack;
+  s_discrete_active_color = persist_exists(PERSIST_KEY_DISCRETE_ACTIVE)
+    ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_ACTIVE))
+    : parse_hex_color("#ff0055");
+
+  s_discrete_face = persist_exists(PERSIST_KEY_DISCRETE_FACE)
+    ? persist_read_int(PERSIST_KEY_DISCRETE_FACE)
+    : DISCRETE_FACE_ANALOG;
+  s_battery_source = persist_exists(PERSIST_KEY_BATTERY_SOURCE)
+    ? persist_read_int(PERSIST_KEY_BATTERY_SOURCE)
+    : BATTERY_SOURCE_WATCH;
 
   recompute_basic_pattern_color();
   recompute_discrete_muted();

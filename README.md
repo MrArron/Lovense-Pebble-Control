@@ -11,27 +11,47 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Confirmed working on real Pebble Time 2 hardware** as of this checkpoint:
-boot (the `strtol()` root-cause fix holds), Basic mode (background/text/
-accent colors render correctly, contrast fix applied), Discrete mode
-(bezel/day-row/time/date/toy-name layout matches the mockups — BT/battery in
-top corners, time/date centered), the Presets tab (12 presets, correct
-initial-match highlighting, full mini-preview tiles), and the idle-revert
-behavior.
+**Confirmed working on real Pebble Time 2 hardware**, pre-Discrete-redesign
+checkpoint: boot (the `strtol()` root-cause fix holds), Basic mode
+(background/text/accent colors render correctly, contrast fix applied), the
+Presets tab (correct initial-match highlighting, full mini-preview tiles),
+and the idle-revert behavior.
 
-**Untested**: the Chalk (round display) variant — no round hardware or
-emulator was available to verify it against.
+**Discrete mode was redesigned** from a single disguised-digital face (1a)
+into two selectable faces — see "Display styles" below. This is a large,
+not-yet-hardware-tested change (written from a pixel-exact design spec, not
+verified on a physical Emery or in the emulator yet):
 
-**Deferred, not yet built** (mocked up and discussed, explicitly queued as
-the next round of work): a **Toy Settings** screen (status, "Test
-connection"/"Test vibration" buttons, custom toy groups — confirmed feasible
-via the Lovense API's array `toy` field), a light/dark mode toggle for the
-settings page's own chrome, a three-state (connecting/connected/
-disconnected) toy-connection glyph, a persistent toy-name + battery row in
-Basic mode with a watch-vs-toy battery-source setting, "save custom colors
-as a new named preset," and preventing the same color being picked for text
-and background. Each is described in more detail in its relevant section
-below and in "Extending it" at the bottom.
+- **Analog** — an ordinary analog watch face; the second hand encodes
+  vibration level (position + color), reverting to true seconds after the
+  idle stand-down period.
+- **Digital** — digital time with a chronograph-style sub-dial at 6 o'clock
+  encoding level, plus a Steady/Pulse/Wave totalizer register.
+
+Both faces share the existing bezel/background/text color model plus a new
+independent **active (vibrating) color**, default Lovense pink, never reset
+by presets. `frame_update_proc`/`day_row_update_proc`/`blend_colors` carried
+over unchanged from 1a. Non-Emery rectangular platforms (aplite/basalt/
+diorite) get every Emery-derived layout constant scaled proportionally
+rather than clipped; Chalk keeps its own hand-tuned numbers.
+
+Also implemented this pass: a **Toy Settings** tab (status, Test connection/
+Test vibration buttons that talk to the Lovense API directly from the
+settings page, custom toy groups targeting multiple toys at once via a
+comma-joined `toy` field), a light/dark toggle for the settings page's own
+chrome, a persistent toy-name + battery row in Basic mode with a watch-vs-toy
+battery-source setting, "save custom colors as a new named preset" (with
+delete), and preventing the same color being picked for text and background.
+
+**Untested**: none of the above has run on real hardware or in the emulator
+yet - this whole pass needs a `pebble build`/`pebble install` verification
+round before being trusted on a physical watch. The Chalk (round display)
+variant was already untested before this pass and remains so.
+
+**Deferred, not yet built** (explicitly out of scope for this pass): a
+three-state (connecting/connected/disconnected) toy-connection glyph,
+persisting the selected pattern/toy across app restarts, and real-hardware
+testing/layout tuning for Chalk. See "Extending it" at the bottom.
 
 **To resume this work in a new session**, the most useful things to paste
 back in are: this README (has all the design decisions and reasoning), and
@@ -133,25 +153,44 @@ All commands target whichever toy (or "All Toys") is currently selected.
   optimizations" below for why. Background, text, and accent (pattern label
   + bar background) colors are all customizable from the phone's settings
   page.
-- **Discrete** — disguised as an ordinary minimalist digital watchface,
-  styled after classic LCD watch faces: a bezel-colored border around a
-  plain background, a day-of-week row with today highlighted, and small
-  battery-percentage and toy-connection glyphs in the bottom corners, plus a
-  date row. Time and the disguised intensity share a single row formatted
-  like a real `HH:MM:SS` readout (e.g. `20:49:12`, where `12` is the
-  intensity, not real seconds). The only sign of active/paused state is that
-  row's color (customizable "text" color when paused, fixed red when
-  vibrating). The current pattern isn't shown anywhere in this mode by
-  design; instead, cycling patterns gives a distinct number of short wrist
-  buzzes (1 for Steady, 2 for Pulse, 3 for Wave) — a haptic tap looks like
-  completely ordinary watch feedback, so it doesn't compromise the disguise.
-  Holding SELECT to change toy is the one exception to "nothing shows on
-  screen": the selected toy's name appears under the date for 5 seconds,
-  then disappears on its own. Bezel, background, and text colors are all
-  customizable from the phone's settings page (see below); the red
-  active/vibrating signal and the muted secondary tone (date, unselected
-  weekday letters, disconnected-toy glyph color) are fixed, since they're
-  part of how the disguise actually communicates state.
+- **Discrete** — disguised as an ordinary watchface. There are two selectable
+  Discrete face styles (a settings-page toggle, `discrete_face`, shared
+  presets/colors between them so switching styles keeps the same look):
+  - **Analog** — a plain analog watch: hour and minute hands show real time,
+    and a second hand encodes vibration level (angle = level × 18°). The
+    hand is muted whenever not vibrating (any level, including 0) and turns
+    the active/pink color only while actively vibrating — to an observer
+    it's just a second hand at a plausible position.
+  - **Digital** — digital `HH:MM` time with a day-of-week row, plus a
+    chronograph-style sub-dial at 6 o'clock whose needle encodes level
+    (angle = level⁄20 of a full turn) and whose ring/needle color follows the
+    same active/muted state rule as the Analog hand. Below it, a Steady/
+    Pulse/Wave register drawn as Roman numerals (I/II/III) with a marker
+    triangle on the selected pattern reads as an ordinary chronograph
+    totalizer.
+
+  On both faces, the level indicator reverts to showing **true elapsed
+  seconds** (an ordinary running second hand / sweeping chrono sub-dial)
+  after the idle stand-down period with no button press, and snaps back to
+  the vibration-level position the instant a button is pressed — the same
+  "look ordinary at rest" idea 1a's digit-disguise used, just expressed as
+  hand position instead of a digit swap. Color (muted/active) always
+  reflects real vibration state regardless of idle, so the disguise never
+  hides *that* something is running, only *what number* it's at.
+
+  A "BT" label + a small status dot (muted when connected, red when lost)
+  plus a battery percentage sit in a status row on both faces; the label
+  itself no longer recolors on connection loss — only the dot does. The
+  current pattern isn't otherwise shown in Analog; instead, cycling patterns
+  gives a distinct number of short wrist buzzes (1/2/3 for Steady/Pulse/
+  Wave) — a haptic tap looks like completely ordinary watch feedback and
+  doesn't compromise the disguise. Holding SELECT to change toy still
+  reveals the selected toy's name briefly (reusing the date row) before
+  reverting. Bezel/background/text are customizable from the phone's
+  settings page along with a new independent **active (vibrating) color**
+  (default Lovense pink, not reset by presets); the muted secondary tone and
+  BT-lost red are fixed, since they're part of how the disguise communicates
+  state.
 
 ## Patterns
 
@@ -178,10 +217,11 @@ watchapp is launched.
 
 ## Toy connection detection
 
-The Discrete face's bottom-left glyph (labeled "BT") shows whether the
-Lovense toy itself is still connected to the phone — not the watch's own
-Bluetooth link to the phone, which is a separate, less useful signal. It's
-muted when connected, and switches to the bezel color when not.
+The Discrete face's status row (labeled "BT") shows whether the Lovense toy
+itself is still connected to the phone — not the watch's own Bluetooth link
+to the phone, which is a separate, less useful signal. The "BT" label itself
+stays muted either way; a small dot next to it carries the state instead —
+muted when connected, red when lost — so the label doesn't need to recolor.
 
 The primary source is the **Toy Events API** — a WebSocket connection
 (`ws://{ip}:{port}/v1`) that pushes `toy-list` and `toy-status` events the
@@ -223,38 +263,56 @@ restarts it on the new one, using the last known intensity and pattern.
 Selection isn't persisted on either side — both the watch's index and the
 phone's list reset to "All Toys" on relaunch.
 
+**Toy groups**: the settings page's Toy tab lets you check a subset of known
+toys, name the group, and save it — groups are appended to the hold-SELECT
+cycle after the individual toys (`{name, toyIds:[]}` in `localStorage`,
+merged into the toy list fresh on every GetToys/Events refresh via
+`appendToyGroups()`, dropping any stale member ids silently). Targeting a
+group sends every member's id at once, comma-joined into the `toy` field
+(`currentToyId()` joins an array selection into a single string before any
+`Function`/`Pattern` request sees it) — the Standard API's documented way to
+target multiple specific toys at once (Remote 7.71.0+).
+
 ## Basic and Discrete mode colors
 
 The settings page has color pickers (a handful of preset swatches each, not
 a full picker) for:
 
 - **Basic mode**: background, text, and accent (pattern label + button bar
-  background).
-- **Discrete mode**: bezel, background, and text (the last applies to the
-  time row when paused, today's highlighted weekday letter, and the toy-name
-  reveal).
+  background), plus a persistent toy-name + battery row (battery source —
+  the watch's own or the currently selected toy's — is a separate setting).
+- **Discrete mode**: bezel, background, and text (used by both the Analog
+  and Digital faces — see "Display styles"), plus an independent **active
+  (vibrating) color** (default Lovense pink) shared by both faces and never
+  touched by presets.
 
-All six are sent to the watch as hex strings, parsed into `GColor`s, and
-persisted on-watch with `persist_write_int` the same way `ui_style` is — so
-they survive app restarts and don't need the phone to resend them (though it
-does anyway on `ready`, in case they were never received the first time).
+All of these are sent to the watch as hex strings (or ints for the discrete
+face / battery source choices), parsed into `GColor`s, and persisted
+on-watch with `persist_write_int` the same way `ui_style` is — so they
+survive app restarts and don't need the phone to resend them (though it does
+anyway on `ready`, in case they were never received the first time).
 
-Discrete mode's red active/vibrating signal and its muted secondary tone
-(date, unselected weekday letters) are intentionally not customizable —
-changing those would blur the one visual cue the disguise actually relies on
-to communicate state.
+Discrete mode's muted secondary tone and the fixed BT-lost red are
+intentionally not customizable — changing those would blur the one visual
+cue the disguise actually relies on to communicate state. The Custom tab
+also refuses to let text and background land on the same color (would make
+text invisible) — picking a swatch that would collide with the paired field
+is rejected with an alert instead of applied.
 
 ## Presets
 
-The settings page's Colors section has two tabs: **Presets** and **Custom**.
-Presets is the default — a grid of 12 ready-made looks (Lovense pink,
-Classic, Midnight, Forest, Plum, Teal, Rust, Amber, Slate, Crimson, Violet,
-Ocean), each a small live-rendered tile showing its actual bezel/background/
-text colors. Tapping one sets all six color fields at once (Basic's
-background/text/accent and Discrete's bezel/background/text), using the
-mapping: Discrete's bezel becomes Basic's accent, and Discrete's background/
-text become Basic's background/text — so a preset gives one consistent look
-across both display styles rather than needing to set six values by hand.
+The settings page's Colors section has three tabs: **Presets**, **Custom**,
+and **Toy**. Presets is the default — a grid of 15 ready-made looks (the
+original 12 — Lovense pink, Classic, Midnight, Forest, Plum, Teal, Rust,
+Amber, Slate, Crimson, Violet, Ocean — plus Steel, Ink, and Sand), each a
+small live-rendered tile showing its actual bezel/background/text colors.
+Tapping one sets all six color fields at once (Basic's background/text/
+accent and Discrete's bezel/background/text), using the mapping: Discrete's
+bezel becomes Basic's accent, and Discrete's background/text become Basic's
+background/text — so a preset gives one consistent look across both display
+styles rather than needing to set six values by hand. The active/vibrating
+color is deliberately not part of any preset (built-in or custom) — it's a
+standalone always-pink-by-default setting a preset tap never overwrites.
 
 Custom reveals the same swatch pickers as before, now with more options per
 row (7-8 instead of 4-6) after the "give more freedom, keep white/black/an
@@ -263,20 +321,23 @@ unverified approximation of their brand color) is available both as a
 one-tap preset and as a standalone swatch in the bezel/background/text rows,
 so it can be mixed with any other color too.
 
-There's no "save my custom combo as a new preset" flow yet — presets are the
-12 built-in ones only. That, plus preventing the same color being picked for
-text and background (which would make text invisible), are both queued for
-the next round; see "Extending it" below.
+Custom also has a **"Save as preset"** flow: name the current bezel/
+background/text combo and it's appended to the Presets grid with a delete
+("×") button that only appears on custom tiles. Everything stays in the
+config page's own in-memory state (Pebble config pages have no live
+round-trip back into `index.js` while open) until the main **Save** button,
+which bundles the custom-preset list into the same close payload as every
+other setting; `webviewclosed` persists it to `localStorage` from there —
+the same pattern every other field on this page already uses.
 
-Each preset tile is a genuine mini-preview of what the watch will actually
-show, not just a flat swatch: a day-of-week row (with a highlighted day),
-the full combined `HH:MM:SS` time row, a date row, and a line below it
-standing in for the toy-name reveal — using the same colors, in the same
-relative positions, as the real Discrete layout. The "muted" secondary
-tones in the preview (day letters, date) are computed the same way the
-watch computes them (see "Secondary color contrast" below) via a JS
-`blendHex()` that mirrors the watch's `blend_colors()`, so what you see in
-Settings should closely match what actually renders — though the watch's
+Each preset tile is a live mini-preview of the discrete colors, not just a
+flat swatch: a day-of-week row (with a highlighted day), a time row, and a
+date row, using the same colors as the real Discrete layout (it no longer
+tries to mimic either face's exact geometry — just the palette). The
+"muted" secondary tones in the preview (day letters, date) are computed the
+same way the watch computes them (see "Secondary color contrast" below) via
+a JS `blendHex()` that mirrors the watch's `blend_colors()`, so what you see
+in Settings should closely match what actually renders — though the watch's
 `GColor8` only has 4 levels per channel, so its exact shade may be a touch
 different from the phone preview's full 8-bit precision.
 
@@ -301,12 +362,17 @@ works out.  Recomputed whenever colors change (`apply_basic_colors`/
 
 ## Idle behavior
 
-**Discrete mode**: after 10 seconds with no button press, the disguised
-`:NN` intensity reading reverts to real, ticking seconds — indistinguishable
-from an ordinary watchface at rest. The watch switches from `MINUTE_UNIT` to
-`SECOND_UNIT` tick updates only while idle in Discrete mode, to avoid the
-battery cost of ticking every second all the time. Any button press
-immediately reverts to the disguised reading and restarts the 10s timer.
+**Discrete mode**: after 10 seconds with no button press, the level
+indicator (Analog's second hand / Digital's chrono needle) reverts to
+showing real, sweeping seconds — indistinguishable from an ordinary running
+second hand / chronograph sub-dial at rest. The watch switches from
+`MINUTE_UNIT` to `SECOND_UNIT` tick updates only while idle in Discrete
+mode, to avoid the battery cost of ticking every second all the time. Any
+button press immediately snaps the indicator back to the vibration-level
+position and restarts the 10s timer. Color (muted/active) is unaffected by
+idle state either way — only the hand's *position* is disguised, the same
+principle 1a's digit-swap used, just expressed as hand angle now that
+there's no "seconds" digit to swap.
 
 **Basic mode**: the same 10-second idle timer swaps the tip text to a plain
 "Idle - press any button to wake" hint. This is a static swap, not a live
@@ -495,35 +561,39 @@ above, a couple of other things in Lovense's public docs stood out:
 
 ## Extending it
 
-Deferred from this build - genuinely new features that deserve their own
-focused testing pass rather than being bundled into a big release, given how
-fragile this specific hardware/toolchain combination has proven (see the
-`strtol()` writeup above):
+Built in the Discrete-redesign pass (see "Project status" at the top for
+what's still untested on real hardware):
 
-- **Toy Settings screen** (renamed from an earlier "Diagnostics" concept) -
-  connection/battery/socket status, a "Test connection" button (one-off
-  `GetToys` check), a "Test vibration" button (brief low-intensity pulse),
-  and custom toy groups (named subsets of connected toys, sent as an array
-  in the `toy` field per Remote 7.71.0+ - confirmed feasible, not yet built).
-- Light/dark mode toggle for the settings page's own chrome (separate from
-  the watch's Basic/Discrete colors) - accent buttons would stay the same
-  pink in both modes; only backgrounds/text/dividers would flip.
+- **Toy Settings tab** — connection/socket status, per-toy battery, a "Test
+  connection" button (`GetToys` sent directly from the config page's own
+  webview, no pkjs round-trip), a "Test vibration" button (brief low-
+  intensity pulse, same direct-from-webview approach), and custom toy groups
+  (named subsets of known toys, targeted via a comma-joined `toy` field).
+- Light/dark toggle for the settings page's own chrome, via CSS custom
+  properties on `<body data-theme>` — accent stays the same pink in both
+  modes, only backgrounds/text/dividers flip.
+- A persistent toy name + battery row in Basic mode (previously Discrete-
+  only), plus a `battery_source` setting for whether that reading is the
+  watch's own or the selected toy's.
+- "Save custom colors as a new named preset," with delete — the Presets tab
+  is now the 15 built-ins plus any custom ones, added/removed entirely
+  client-side in the config page and persisted through the same Save flow
+  as everything else.
+- Preventing the same color being selected for text and background in
+  Custom mode — a swatch pick that would collide with its paired field is
+  rejected with an alert instead of applied.
+
+Still deferred - genuinely new work that deserves its own focused testing
+pass rather than being bundled further, given how fragile this specific
+hardware/toolchain combination has proven (see the `strtol()` writeup
+above):
+
 - A three-state toy-connection glyph (connecting/connected/disconnected)
   instead of the current two-state one, to avoid the brief window right
   after launch where "connected" is shown optimistically before the first
   real check completes.
-- A persistent toy name + battery-source row in Basic mode (currently
-  Discrete-only), plus a settings toggle for whether that battery reading
-  is the watch's own or the toy's.
-- "Save custom colors as a new named preset" (local-only, with delete) —
-  the Presets tab currently only has the 12 built-in ones.
-- Preventing the same color being selected for text and background in
-  Custom mode, since that would make text invisible.
 
 Other ideas:
-- Support targeting multiple specific toys at once (not just one or all) by
-  sending an array in the `toy` field, per Remote 7.71.0+ (same mechanism
-  toy groups above would use).
 - Persist the selected pattern and toy with `persist_write_int`/a small
   on-watch string buffer, the same way `ui_style` and the colors are, if you
   want them to survive app restarts.

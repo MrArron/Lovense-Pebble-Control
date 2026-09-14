@@ -31,7 +31,11 @@
       "basic_accent_color",
       "discrete_bezel_color",
       "discrete_bg_color",
-      "discrete_text_color"
+      "discrete_text_color",
+      "discrete_active_color",
+      "discrete_face",
+      "battery_source",
+      "toy_battery"
     ],
     "resources": {
       "media": []

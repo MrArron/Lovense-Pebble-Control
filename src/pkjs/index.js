@@ -93,26 +93,111 @@ var WAVE_SHAPE = [0.2, 0.4, 0.7, 1, 0.7, 0.4];
 // Toy selection: index 0 is always "All Toys" (omitting the toy field
 // targets every connected toy); indices 1+ are specific toy IDs, kept in
 // sync with whatever the Events API (or the GetToys fallback) last reported.
+// Saved toy groups (named subsets, id = an array of toy ids) are appended
+// after the individual toys - see appendToyGroups()/setToyListFromEntries().
 var s_toyList = [{ id: null, name: 'All Toys' }];
 var s_selectedToyIndex = 0;
 var s_lastIntensity = 0;
 var s_lastPattern = PATTERN_STEADY;
+var s_toyBattery = {}; // toy id -> 0-100, from GetToys / the battery-changed event
+var s_lastSentToyBattery = null; // avoid re-sending the same value to the watch repeatedly
+
+function appendToyGroups(list, knownIds) {
+  var groups = [];
+  try {
+    groups = JSON.parse(localStorage.getItem('toyGroups') || '[]');
+  } catch (e) {
+    groups = [];
+  }
+  groups.forEach(function (g) {
+    var ids = (g.toyIds || []).filter(function (id) { return knownIds[id]; });
+    if (ids.length === 0) {
+      return; // every member is stale - skip rather than keep a dead entry
+    }
+    list.push({ id: ids, name: (g.name || '').substring(0, 20) });
+  });
+}
 
 function setToyListFromEntries(entries) {
   var list = [{ id: null, name: 'All Toys' }];
+  var knownIds = {};
   (entries || []).forEach(function (t) {
     var label = (t.nickName && t.nickName.length) ? t.nickName : t.name;
     list.push({ id: t.id, name: (label || t.id || '').substring(0, 20) });
+    knownIds[t.id] = true;
+    if (typeof t.battery === 'number') {
+      s_toyBattery[t.id] = t.battery;
+    }
   });
+  appendToyGroups(list, knownIds);
   s_toyList = list;
   if (s_selectedToyIndex >= s_toyList.length) {
     s_selectedToyIndex = 0;
   }
+  sendToyBatteryIfChanged();
+}
+
+// Re-derives the toy list from whatever individual toys are currently known
+// (dropping any existing group entries first) and re-appends groups fresh
+// from localStorage - used after the settings page edits toyGroups, so the
+// change takes effect without waiting for the next GetToys/Events refresh.
+function refreshToyListFromStorage() {
+  var entries = s_toyList
+    .filter(function (t) { return t.id && !Array.isArray(t.id); })
+    .map(function (t) { return { id: t.id, name: t.name }; });
+  setToyListFromEntries(entries);
 }
 
 function currentToyId() {
   var t = s_toyList[s_selectedToyIndex];
-  return t ? t.id : null;
+  if (!t || !t.id) {
+    return null;
+  }
+  if (Array.isArray(t.id)) {
+    // Lovense's HTTP API expects a comma-joined toy list in the `toy` field,
+    // not a JSON array; joining first also sidesteps `if ([])` being truthy
+    // for an empty array. Every downstream consumer below only ever sees a
+    // plain string or null from here on, never a raw array.
+    return t.id.length ? t.id.join(',') : null;
+  }
+  return t.id;
+}
+
+function currentToyBattery() {
+  var t = s_toyList[s_selectedToyIndex];
+  if (!t || !t.id) {
+    // "All Toys" has no single battery reading - fall back to the first
+    // known individual toy's, if any.
+    for (var i = 1; i < s_toyList.length; i++) {
+      var candidate = s_toyList[i];
+      if (!Array.isArray(candidate.id) && s_toyBattery.hasOwnProperty(candidate.id)) {
+        return s_toyBattery[candidate.id];
+      }
+    }
+    return -1;
+  }
+  if (Array.isArray(t.id)) {
+    for (var j = 0; j < t.id.length; j++) {
+      if (s_toyBattery.hasOwnProperty(t.id[j])) {
+        return s_toyBattery[t.id[j]];
+      }
+    }
+    return -1;
+  }
+  return s_toyBattery.hasOwnProperty(t.id) ? s_toyBattery[t.id] : -1;
+}
+
+function sendToyBatteryIfChanged() {
+  var pct = currentToyBattery();
+  if (pct === s_lastSentToyBattery) {
+    return;
+  }
+  s_lastSentToyBattery = pct;
+  queueAppMessage({ toy_battery: pct }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send toy battery to watch.');
+  });
 }
 
 function sendToyNameToWatch(name) {
@@ -322,6 +407,12 @@ function handleToyEvent(raw) {
       }
       recomputeAggregateConnection();
       break;
+    case 'battery-changed':
+      if (msg.toyId && msg.data && typeof msg.data.battery === 'number') {
+        s_toyBattery[msg.toyId] = msg.data.battery;
+        sendToyBatteryIfChanged();
+      }
+      break;
     case 'event-closed':
       // Game Mode was turned off in the Lovense app - the socket will close
       // itself right after this, which triggers our reconnect/fallback below.
@@ -330,7 +421,7 @@ function handleToyEvent(raw) {
       break;
     case 'pong':
     default:
-      break; // keepalive ack, battery-changed, button events, etc. - unused for now
+      break; // keepalive ack, button events, etc. - unused for now
   }
 }
 
@@ -385,6 +476,22 @@ function sendUiStyleToWatch(uiStyle) {
   });
 }
 
+function sendDiscreteFaceToWatch(face) {
+  queueAppMessage({ discrete_face: face === 'chrono' ? 1 : 0 }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send discrete face to watch.');
+  });
+}
+
+function sendBatterySourceToWatch(source) {
+  queueAppMessage({ battery_source: source === 'toy' ? 1 : 0 }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send battery source to watch.');
+  });
+}
+
 function sendBasicColorsToWatch() {
   queueAppMessage({
     basic_bg_color: getSetting('basicColorBg', '#ffffff'),
@@ -409,13 +516,26 @@ function sendDiscreteColorsToWatch() {
   });
 }
 
+function sendDiscreteActiveColorToWatch() {
+  queueAppMessage({
+    discrete_active_color: getSetting('discreteColorActive', '#ff0055')
+  }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send active color to watch.');
+  });
+}
+
 Pebble.addEventListener('ready', function () {
   console.log('Lovense Remote companion ready.');
   // Re-sync the watch's UI style and colors on launch, in case they were
   // never pushed down before (e.g. after reinstalling the watchapp).
   sendUiStyleToWatch(getSetting('lovenseUiStyle', 'basic'));
+  sendDiscreteFaceToWatch(getSetting('discreteFace', 'analog'));
   sendBasicColorsToWatch();
   sendDiscreteColorsToWatch();
+  sendDiscreteActiveColorToWatch();
+  sendBatterySourceToWatch(getSetting('batterySource', 'watch'));
   checkToyConnection(); // immediate baseline before the socket handshake completes
   connectToyEvents();
 });
@@ -454,6 +574,7 @@ Pebble.addEventListener('appmessage', function (e) {
       startPatternTo(newToyId, s_lastPattern, s_lastIntensity);
     }
     sendToyNameToWatch(s_toyList[s_selectedToyIndex].name);
+    sendToyBatteryIfChanged();
   } else {
     console.log('Unknown command from watch: ' + command);
   }
@@ -466,6 +587,14 @@ Pebble.addEventListener('showConfiguration', function () {
   var basicChecked = uiStyle === 'basic' ? 'checked' : '';
   var discreteChecked = uiStyle === 'discrete' ? 'checked' : '';
 
+  var discreteFace = getSetting('discreteFace', 'analog');
+  var faceAnalogChecked = discreteFace === 'analog' ? 'checked' : '';
+  var faceChronoChecked = discreteFace === 'chrono' ? 'checked' : '';
+
+  var batterySource = getSetting('batterySource', 'watch');
+  var batteryWatchChecked = batterySource === 'watch' ? 'checked' : '';
+  var batteryToyChecked = batterySource === 'toy' ? 'checked' : '';
+
   var basicBg = getSetting('basicColorBg', '#ffffff');
   var basicText = getSetting('basicColorText', '#000000');
   var basicAccent = getSetting('basicColorAccent', '#e0245e');
@@ -473,10 +602,18 @@ Pebble.addEventListener('showConfiguration', function () {
   var discreteBezel = getSetting('discreteColorBezel', '#7a1f1f');
   var discreteBg = getSetting('discreteColorBg', '#f5e9a8');
   var discreteText = getSetting('discreteColorText', '#000000');
+  var discreteActive = getSetting('discreteColorActive', '#ff0055');
 
-  // Each preset sets all six color fields together. basicAccent mirrors the
-  // Discrete bezel and basicBg/basicText mirror Discrete's background/text,
-  // so a preset gives one consistent look across both display styles.
+  var settingsTheme = getSetting('settingsTheme', 'dark');
+  var customPresetsRaw = getSetting('customPresets', '[]');
+  var toyGroupsRaw = getSetting('toyGroups', '[]');
+
+  // Each built-in preset sets all six color fields together. basicAccent
+  // mirrors the Discrete bezel and basicBg/basicText mirror Discrete's
+  // background/text, so a preset gives one consistent look across both
+  // display styles. The active/vibrating color is deliberately NOT part of
+  // a preset - it's a separate, always-pink-by-default setting that presets
+  // never touch (see the design handoff's color-role table).
   var PRESETS = [
     { name: 'Lovense pink', bezel: '#e4007c', bg: '#ffffff', text: '#000000' },
     { name: 'Classic', bezel: '#7a1f1f', bg: '#f5e9a8', text: '#000000' },
@@ -489,7 +626,10 @@ Pebble.addEventListener('showConfiguration', function () {
     { name: 'Slate', bezel: '#3d4a52', bg: '#e8edf0', text: '#1f2a30' },
     { name: 'Crimson', bezel: '#c41e3a', bg: '#fff0f0', text: '#6b0f1a' },
     { name: 'Violet', bezel: '#6d4aa0', bg: '#f3edfa', text: '#3a2560' },
-    { name: 'Ocean', bezel: '#1a6fa0', bg: '#e6f4fa', text: '#0a3a52' }
+    { name: 'Ocean', bezel: '#1a6fa0', bg: '#e6f4fa', text: '#0a3a52' },
+    { name: 'Steel', bezel: '#555555', bg: '#ffffff', text: '#000000' },
+    { name: 'Ink', bezel: '#0055aa', bg: '#000000', text: '#ffffff' },
+    { name: 'Sand', bezel: '#aa5500', bg: '#ffffaa', text: '#550000' }
   ];
 
   var BG_SWATCHES = ['#ffffff', '#111111', '#f5ecd8', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
@@ -499,6 +639,24 @@ Pebble.addEventListener('showConfiguration', function () {
   var BEZEL_SWATCHES = ['#7a1f1f', '#1d4e89', '#2e6b4f', '#5a3d7a', '#333333', '#1a5f5f', '#e4007c'];
   var DISCRETE_BG_SWATCHES = ['#f5e9a8', '#ffffff', '#111111', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
   var DISCRETE_TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0', '#7a1f1f', '#c9a227'];
+  var ACTIVE_SWATCHES = ['#ff0055', '#e0245e', '#ff3366', '#cc0044', '#ff6699', '#990033'];
+
+  // Live snapshot of the toy state pkjs already holds, for the Toy tab -
+  // config pages have no round-trip back into pkjs while open, so this is
+  // as fresh as it can be (as of the moment Settings was opened).
+  var knownToys = [];
+  s_toyList.forEach(function (t) {
+    if (t.id && !Array.isArray(t.id)) {
+      knownToys.push({
+        id: t.id,
+        name: t.name,
+        connected: s_toyStates.hasOwnProperty(t.id) ? !!s_toyStates[t.id] : null,
+        battery: s_toyBattery.hasOwnProperty(t.id) ? (s_toyBattery[t.id] + '%') : '--'
+      });
+    }
+  });
+  var eventsSocketStatus = s_eventsAccessGranted ? 'Connected (live events)' : 'Polling fallback';
+  var aggregateStatus = s_lastKnownConnected ? 'Connected' : 'Not connected';
 
   function swatchRow(name, options, current) {
     var html = '<div class="swatch-row" data-target="' + name + '">';
@@ -511,75 +669,70 @@ Pebble.addEventListener('showConfiguration', function () {
     return html;
   }
 
-  function blendHex(hexA, hexB) {
-    // Mirrors the watch's blend_colors() - a plain RGB midpoint - so the
-    // preview's muted tones match what the watch will actually show,
-    // rather than a fixed color that only looks right on a pale background.
-    var a = { r: parseInt(hexA.substr(1, 2), 16), g: parseInt(hexA.substr(3, 2), 16), b: parseInt(hexA.substr(5, 2), 16) };
-    var b = { r: parseInt(hexB.substr(1, 2), 16), g: parseInt(hexB.substr(3, 2), 16), b: parseInt(hexB.substr(5, 2), 16) };
-    function h(n) {
-      n = Math.round(n);
-      n = Math.max(0, Math.min(255, n));
-      var s = n.toString(16);
-      return s.length === 1 ? '0' + s : s;
-    }
-    return '#' + h((a.r + b.r) / 2) + h((a.g + b.g) / 2) + h((a.b + b.b) / 2);
-  }
-
-  function presetTile(index, preset) {
-    var muted = blendHex(preset.bg, preset.text);
-    return '<div class="preset-tile" onclick="applyPreset(' + index + ')">' +
-      '<div class="preset-swatch" style="background:' + preset.bezel + '">' +
-      '<div class="preset-inner" style="background:' + preset.bg + '">' +
-      '<div class="preset-days" style="color:' + muted + '">S M T <b style="color:' + preset.text + '">W</b> T F S</div>' +
-      '<div class="preset-time" style="color:' + preset.text + '">20:49:12</div>' +
-      '<div class="preset-date" style="color:' + muted + '">FRI 22</div>' +
-      '<div class="preset-toy" style="color:' + preset.text + '">Nora</div>' +
-      '</div></div><span>' + preset.name + '</span></div>';
-  }
-
-  var presetsHtml = PRESETS.map(function (p, i) { return presetTile(i, p); }).join('');
+  var knownToysHtml = knownToys.length ? knownToys.map(function (t) {
+    var dot = t.connected === null ? '#666' : (t.connected ? '#2ecc71' : '#e74c3c');
+    return '<div class="toy-row"><span class="toy-dot" style="background:' + dot + '"></span>' +
+      '<span class="toy-row-name">' + t.name + '</span><span class="toy-row-batt">' + t.battery + '</span>' +
+      '<label class="toy-check"><input type="checkbox" class="group-member" value="' + t.id + '"> in group</label></div>';
+  }).join('') : '<p class="hint">No toys known yet - open Lovense Remote and connect one, or just save the IP/port above and come back.</p>';
 
   var html = '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<style>' +
     '*{box-sizing:border-box}' +
     'html,body{height:100%;margin:0}' +
-    'body{font-family:sans-serif;background:#111;color:#eee;display:flex;flex-direction:column}' +
-    '.header{padding:16px 18px 12px;border-bottom:0.5px solid #292929;flex-shrink:0}' +
+    'body{--bg:#111;--fg:#eee;--card:#1c1c1e;--border:#292929;--muted:#999;--accent:#e0245e;' +
+    'font-family:sans-serif;background:var(--bg);color:var(--fg);display:flex;flex-direction:column}' +
+    'body[data-theme="light"]{--bg:#f4f4f6;--fg:#111;--card:#ffffff;--border:#e3e3e6;--muted:#666}' +
+    '.header{padding:16px 18px 12px;border-bottom:0.5px solid var(--border);flex-shrink:0;display:flex;justify-content:space-between;align-items:center}' +
     '.header h3{margin:0;font-size:17px}' +
+    '.theme-toggle{font-size:12px;color:var(--muted);background:var(--card);border:0.5px solid var(--border);border-radius:8px;padding:6px 10px}' +
     '.content{padding:16px 18px;flex:1;overflow-y:auto;min-height:0}' +
-    '.footer{padding:14px 18px;border-top:0.5px solid #292929;flex-shrink:0}' +
+    '.footer{padding:14px 18px;border-top:0.5px solid var(--border);flex-shrink:0}' +
     'label{display:block;margin-top:12px;font-size:14px}' +
-    'input[type=text]{width:100%;padding:8px;margin-top:4px;font-size:16px;background:#1c1c1e;border:none;border-radius:8px;color:#eee}' +
+    'input[type=text]{width:100%;padding:8px;margin-top:4px;font-size:16px;background:var(--card);border:0.5px solid var(--border);border-radius:8px;color:var(--fg)}' +
     '.radio-row{display:flex;align-items:center;margin-top:8px;font-size:15px}' +
     '.radio-row input{width:auto;margin-right:10px}' +
     '.swatch-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}' +
     '.swatch{width:26px;height:26px;border-radius:50%;border:2px solid transparent;flex-shrink:0}' +
-    '.swatch.selected{border-color:#fff;box-shadow:0 0 0 2px #111}' +
-    '.card{background:#1c1c1e;border-radius:14px;padding:16px;margin-top:16px}' +
-    '.card p.title{color:#fff;font-size:14px;font-weight:600;margin:0 0 12px}' +
-    'button.save{width:100%;padding:13px;background:#e0245e;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600}' +
-    '.tabs{display:flex;background:#1c1c1e;border-radius:10px;padding:3px;margin-top:16px}' +
-    '.tab{flex:1;text-align:center;padding:8px 0;border-radius:8px;font-size:13px;font-weight:600;color:#999}' +
-    '.tab.active{background:#e0245e;color:#fff}' +
+    '.swatch.selected{border-color:var(--fg);box-shadow:0 0 0 2px var(--bg)}' +
+    '.card{background:var(--card);border-radius:14px;padding:16px;margin-top:16px}' +
+    '.card p.title{color:var(--fg);font-size:14px;font-weight:600;margin:0 0 12px}' +
+    'button.save{width:100%;padding:13px;background:var(--accent);color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600}' +
+    'button.secondary{padding:10px 14px;background:var(--card);color:var(--fg);border:0.5px solid var(--border);border-radius:10px;font-size:13px;margin-top:8px;margin-right:8px}' +
+    '.tabs{display:flex;background:var(--card);border-radius:10px;padding:3px;margin-top:16px}' +
+    '.tab{flex:1;text-align:center;padding:8px 0;border-radius:8px;font-size:13px;font-weight:600;color:var(--muted)}' +
+    '.tab.active{background:var(--accent);color:#fff}' +
     '.preset-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px}' +
-    '.preset-tile{text-align:center;cursor:pointer}' +
-    '.preset-tile.selected .preset-swatch{box-shadow:0 0 0 2px #fff}' +
+    '.preset-tile{text-align:center;cursor:pointer;position:relative}' +
+    '.preset-tile.selected .preset-swatch{box-shadow:0 0 0 2px var(--fg)}' +
     '.preset-tile:not(.selected){opacity:0.7}' +
     '.preset-swatch{width:100%;aspect-ratio:1;border-radius:10px;padding:4px}' +
     '.preset-inner{width:100%;height:100%;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:monospace;overflow:hidden;padding:2px;box-sizing:border-box}' +
     '.preset-days{font-size:4px;letter-spacing:0.5px;line-height:1.3}' +
     '.preset-time{font-size:8px;font-weight:700;line-height:1.4}' +
     '.preset-date{font-size:4px;line-height:1.3}' +
-    '.preset-toy{font-size:4px;line-height:1.3;margin-top:1px}' +
-    '.preset-tile span{font-size:10px;color:#eee}' +
-    'p.hint{font-size:12px;color:#aaa}' +
-    '.disclaimer{border-top:0.5px solid #292929;margin-top:20px;padding-top:14px}' +
-    '.disclaimer p{font-size:11px;line-height:1.5;color:#777;margin:0 0 8px}' +
-    '.disclaimer a{color:#e0245e}' +
-    '</style></head><body>' +
+    '.preset-tile span{font-size:10px;color:var(--fg)}' +
+    '.preset-del{position:absolute;top:-4px;right:-4px;width:18px;height:18px;line-height:18px;text-align:center;' +
+    'background:#e74c3c;color:#fff;border-radius:50%;font-size:13px;z-index:2}' +
+    'p.hint{font-size:12px;color:var(--muted)}' +
+    '.status-line{display:flex;justify-content:space-between;font-size:13px;margin-top:6px}' +
+    '.status-line span:last-child{color:var(--muted)}' +
+    '.toy-row{display:flex;align-items:center;gap:8px;font-size:13px;padding:6px 0;border-bottom:0.5px solid var(--border)}' +
+    '.toy-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}' +
+    '.toy-row-name{flex:1}' +
+    '.toy-row-batt{color:var(--muted);width:40px;text-align:right}' +
+    '.toy-check{display:flex;align-items:center;font-size:11px;color:var(--muted);margin:0}' +
+    '.toy-check input{width:auto;margin-right:4px}' +
+    '.group-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:6px 0;border-bottom:0.5px solid var(--border)}' +
+    '.group-del{color:#e74c3c;font-size:16px;padding:0 6px}' +
+    '#toyTestStatus{font-size:12px;color:var(--muted);margin-top:8px}' +
+    '.disclaimer{border-top:0.5px solid var(--border);margin-top:20px;padding-top:14px}' +
+    '.disclaimer p{font-size:11px;line-height:1.5;color:var(--muted);margin:0 0 8px}' +
+    '.disclaimer a{color:var(--accent)}' +
+    '</style></head><body data-theme="' + settingsTheme + '">' +
 
-    '<div class="header"><h3>Lovense Remote Settings</h3></div>' +
+    '<div class="header"><h3>Lovense Remote Settings</h3>' +
+    '<button type="button" class="theme-toggle" id="themeToggle" onclick="toggleTheme()"></button></div>' +
 
     '<div class="content">' +
 
@@ -597,14 +750,21 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div class="radio-row"><input type="radio" name="uiStyle" id="style-discrete" value="discrete" ' + discreteChecked + '>' +
     '<label for="style-discrete" style="display:inline;margin:0">Discrete — looks like an ordinary watchface</label></div>' +
 
+    '<label style="margin-top:20px">Discrete face style</label>' +
+    '<div class="radio-row"><input type="radio" name="discreteFace" id="face-analog" value="analog" ' + faceAnalogChecked + '>' +
+    '<label for="face-analog" style="display:inline;margin:0">Analog — ordinary analog watch, second hand encodes level</label></div>' +
+    '<div class="radio-row"><input type="radio" name="discreteFace" id="face-chrono" value="chrono" ' + faceChronoChecked + '>' +
+    '<label for="face-chrono" style="display:inline;margin:0">Digital — digital time with a chrono sub-dial</label></div>' +
+
     '<div class="tabs">' +
     '<div class="tab active" id="tab-presets" onclick="showTab(\'presets\')">Presets</div>' +
     '<div class="tab" id="tab-custom" onclick="showTab(\'custom\')">Custom</div>' +
+    '<div class="tab" id="tab-toy" onclick="showTab(\'toy\')">Toy</div>' +
     '</div>' +
 
     '<div id="panel-presets">' +
-    '<div class="preset-grid">' + presetsHtml + '</div>' +
-    '<p class="hint">Each preset sets bezel, background, text, and accent together for both display styles. Switch to Custom to fine-tune anything individually.</p>' +
+    '<div class="preset-grid" id="presetGrid"></div>' +
+    '<p class="hint">Each preset sets bezel, background, text, and accent together for both display styles. The active (vibrating) color is separate - see Custom.</p>' +
     '</div>' +
 
     '<div id="panel-custom" style="display:none">' +
@@ -619,6 +779,44 @@ Pebble.addEventListener('showConfiguration', function () {
     '<label>Bezel</label>' + swatchRow('discreteColorBezel', BEZEL_SWATCHES, discreteBezel) +
     '<label>Background</label>' + swatchRow('discreteColorBg', DISCRETE_BG_SWATCHES, discreteBg) +
     '<label>Text</label>' + swatchRow('discreteColorText', DISCRETE_TEXT_SWATCHES, discreteText) +
+    '<label>Active (vibrating signal) — shared by both discrete faces, not part of a preset</label>' +
+    swatchRow('discreteColorActive', ACTIVE_SWATCHES, discreteActive) +
+    '</div>' +
+    '<div class="card">' +
+    '<p class="title">Save current colors as a preset</p>' +
+    '<input type="text" id="newPresetName" placeholder="Preset name">' +
+    '<button type="button" class="secondary" onclick="saveCustomPreset()">Save as preset</button>' +
+    '<p class="hint">Saved presets appear in the Presets tab with a delete button. Text and background can\'t be set to the same color.</p>' +
+    '</div>' +
+    '</div>' +
+
+    '<div id="panel-toy" style="display:none">' +
+    '<div class="card">' +
+    '<p class="title">Status</p>' +
+    '<div class="status-line"><span>Events socket</span><span>' + eventsSocketStatus + '</span></div>' +
+    '<div class="status-line"><span>Toy connection</span><span>' + aggregateStatus + '</span></div>' +
+    knownToysHtml +
+    '</div>' +
+    '<div class="card">' +
+    '<p class="title">Test with the address above</p>' +
+    '<button type="button" class="secondary" onclick="testConnection()">Test connection</button>' +
+    '<button type="button" class="secondary" onclick="testVibration()">Test vibration</button>' +
+    '<div id="toyTestStatus"></div>' +
+    '</div>' +
+    '<div class="card">' +
+    '<p class="title">Toy groups</p>' +
+    '<p class="hint">Check the toys above to include, name the group, and save. Groups appear in the watch\'s hold-SELECT toy cycle and target every member at once.</p>' +
+    '<div id="groupList"></div>' +
+    '<input type="text" id="newGroupName" placeholder="Group name" style="margin-top:10px">' +
+    '<button type="button" class="secondary" onclick="saveGroup()">Save group</button>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<p class="title">Battery row (Basic mode)</p>' +
+    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-watch" value="watch" ' + batteryWatchChecked + '>' +
+    '<label for="batt-watch" style="display:inline;margin:0">Watch\'s own battery</label></div>' +
+    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-toy" value="toy" ' + batteryToyChecked + '>' +
+    '<label for="batt-toy" style="display:inline;margin:0">Selected toy\'s battery</label></div>' +
     '</div>' +
     '</div>' +
 
@@ -633,13 +831,49 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div class="footer"><button class="save" onclick="save()">Save</button></div>' +
 
     '<script>' +
-    'var PRESETS = ' + JSON.stringify(PRESETS) + ';' +
+    'var BUILTIN_PRESETS = ' + JSON.stringify(PRESETS) + ';' +
+    'var customPresets = (function(){try{return ' + (customPresetsRaw || '[]') + ';}catch(e){return [];}})();' +
+    'var toyGroups = (function(){try{return ' + (toyGroupsRaw || '[]') + ';}catch(e){return [];}})();' +
+    'var currentTheme = "' + settingsTheme + '";' +
+
+    'function blendHex(hexA, hexB){' +
+    'var a={r:parseInt(hexA.substr(1,2),16),g:parseInt(hexA.substr(3,2),16),b:parseInt(hexA.substr(5,2),16)};' +
+    'var b={r:parseInt(hexB.substr(1,2),16),g:parseInt(hexB.substr(3,2),16),b:parseInt(hexB.substr(5,2),16)};' +
+    'function h(n){n=Math.round(n);n=Math.max(0,Math.min(255,n));var s=n.toString(16);return s.length===1?"0"+s:s;}' +
+    'return "#"+h((a.r+b.r)/2)+h((a.g+b.g)/2)+h((a.b+b.b)/2);' +
+    '}' +
+
+    'function allPresets(){return BUILTIN_PRESETS.concat(customPresets);}' +
+
+    'function presetTileHtml(index, preset, isCustom){' +
+    'var muted = blendHex(preset.bg, preset.text);' +
+    'var del = isCustom ? \'<span class="preset-del" onclick="event.stopPropagation();deletePreset(\'+index+\')">&times;</span>\' : "";' +
+    'return \'<div class="preset-tile" onclick="applyPreset(\'+index+\')">\' + del +' +
+    '\'<div class="preset-swatch" style="background:\'+preset.bezel+\'">\' +' +
+    '\'<div class="preset-inner" style="background:\'+preset.bg+\'">\' +' +
+    '\'<div class="preset-days" style="color:\'+muted+\'">S M T <b style="color:\'+preset.text+\'">W</b> T F S</div>\' +' +
+    '\'<div class="preset-time" style="color:\'+preset.text+\'">20:49</div>\' +' +
+    '\'<div class="preset-date" style="color:\'+muted+\'">FRI 22</div>\' +' +
+    '\'</div></div><span>\'+preset.name+\'</span></div>\';' +
+    '}' +
+
+    'function renderPresetGrid(){' +
+    'var all = allPresets();' +
+    'var html = "";' +
+    'for (var i=0;i<all.length;i++){html += presetTileHtml(i, all[i], i >= BUILTIN_PRESETS.length);}' +
+    'document.getElementById("presetGrid").innerHTML = html;' +
+    'highlightMatchingPreset();' +
+    '}' +
+
     'function showTab(name){' +
     'document.getElementById("panel-presets").style.display = name==="presets" ? "" : "none";' +
     'document.getElementById("panel-custom").style.display = name==="custom" ? "" : "none";' +
+    'document.getElementById("panel-toy").style.display = name==="toy" ? "" : "none";' +
     'document.getElementById("tab-presets").className = "tab" + (name==="presets" ? " active" : "");' +
     'document.getElementById("tab-custom").className = "tab" + (name==="custom" ? " active" : "");' +
+    'document.getElementById("tab-toy").className = "tab" + (name==="toy" ? " active" : "");' +
     '}' +
+
     'function setField(id, value){' +
     'document.getElementById(id).value = value;' +
     'var row = document.querySelector(\'.swatch-row[data-target="\'+id+\'"]\');' +
@@ -649,14 +883,16 @@ Pebble.addEventListener('showConfiguration', function () {
     'swatches[i].className = swatches[i].getAttribute("data-color").toLowerCase()===value.toLowerCase() ? "swatch selected" : "swatch";' +
     '}' +
     '}' +
+
     'function markPresetSelected(index){' +
     'var tiles = document.getElementsByClassName("preset-tile");' +
     'for(var i=0;i<tiles.length;i++){' +
     'tiles[i].className = (i===index) ? "preset-tile selected" : "preset-tile";' +
     '}' +
     '}' +
+
     'function applyPreset(index){' +
-    'var p = PRESETS[index];' +
+    'var p = allPresets()[index];' +
     'setField("basicColorBg", p.bg);' +
     'setField("basicColorText", p.text);' +
     'setField("basicColorAccent", p.bezel);' +
@@ -665,44 +901,173 @@ Pebble.addEventListener('showConfiguration', function () {
     'setField("discreteColorText", p.text);' +
     'markPresetSelected(index);' +
     '}' +
+
+    'function deletePreset(index){' +
+    'var customIndex = index - BUILTIN_PRESETS.length;' +
+    'if (customIndex < 0) return;' +
+    'customPresets.splice(customIndex, 1);' +
+    'renderPresetGrid();' +
+    '}' +
+
+    'function saveCustomPreset(){' +
+    'var name = document.getElementById("newPresetName").value;' +
+    'if (!name) { alert("Give the preset a name first."); return; }' +
+    'customPresets.push({' +
+    'name: name,' +
+    'bezel: document.getElementById("discreteColorBezel").value,' +
+    'bg: document.getElementById("discreteColorBg").value,' +
+    'text: document.getElementById("discreteColorText").value' +
+    '});' +
+    'document.getElementById("newPresetName").value = "";' +
+    'renderPresetGrid();' +
+    'showTab("presets");' +
+    '}' +
+
     'function highlightMatchingPreset(){' +
     'var bg = document.getElementById("basicColorBg").value.toLowerCase();' +
     'var text = document.getElementById("basicColorText").value.toLowerCase();' +
     'var accent = document.getElementById("basicColorAccent").value.toLowerCase();' +
-    'for(var i=0;i<PRESETS.length;i++){' +
-    'var p = PRESETS[i];' +
+    'var all = allPresets();' +
+    'for(var i=0;i<all.length;i++){' +
+    'var p = all[i];' +
     'if(p.bg.toLowerCase()===bg && p.text.toLowerCase()===text && p.bezel.toLowerCase()===accent){' +
     'markPresetSelected(i);' +
     'return;' +
     '}' +
     '}' +
     '}' +
-    'highlightMatchingPreset();' +
+
+    'function wouldCollide(target, color){' +
+    'var pairs = [["basicColorBg","basicColorText"],["discreteColorBg","discreteColorText"]];' +
+    'for (var i=0;i<pairs.length;i++){' +
+    'var a=pairs[i][0], b=pairs[i][1];' +
+    'if (target===a){var other=document.getElementById(b).value; if(other.toLowerCase()===color.toLowerCase()) return true;}' +
+    'else if (target===b){var other2=document.getElementById(a).value; if(other2.toLowerCase()===color.toLowerCase()) return true;}' +
+    '}' +
+    'return false;' +
+    '}' +
+
     'function pickColor(el){' +
     'var row=el.parentNode;' +
+    'var target=row.getAttribute("data-target");' +
+    'var color=el.getAttribute("data-color");' +
+    'if (wouldCollide(target, color)) { alert("Text and background can\'t be the same color."); return; }' +
     'var swatches=row.getElementsByClassName("swatch");' +
     'for(var i=0;i<swatches.length;i++){swatches[i].className="swatch";}' +
     'el.className="swatch selected";' +
-    'document.getElementById(row.getAttribute("data-target")).value=el.getAttribute("data-color");' +
+    'document.getElementById(target).value=color;' +
     '}' +
+
+    'function toggleTheme(){' +
+    'currentTheme = currentTheme === "dark" ? "light" : "dark";' +
+    'document.body.setAttribute("data-theme", currentTheme);' +
+    'updateThemeButton();' +
+    '}' +
+    'function updateThemeButton(){' +
+    'document.getElementById("themeToggle").textContent = currentTheme === "dark" ? "Light mode" : "Dark mode";' +
+    '}' +
+    'updateThemeButton();' +
+
+    'function renderGroupList(){' +
+    'var html = toyGroups.length ? "" : \'<p class="hint">No groups saved yet.</p>\';' +
+    'for (var i=0;i<toyGroups.length;i++){' +
+    'html += \'<div class="group-row"><span>\'+toyGroups[i].name+\' (\'+toyGroups[i].toyIds.length+\')</span>\'+' +
+    '\'<span class="group-del" onclick="deleteGroup(\'+i+\')">&times;</span></div>\';' +
+    '}' +
+    'document.getElementById("groupList").innerHTML = html;' +
+    '}' +
+
+    'function deleteGroup(index){' +
+    'toyGroups.splice(index, 1);' +
+    'renderGroupList();' +
+    '}' +
+
+    'function saveGroup(){' +
+    'var name = document.getElementById("newGroupName").value;' +
+    'if (!name) { alert("Give the group a name first."); return; }' +
+    'var checks = document.getElementsByClassName("group-member");' +
+    'var ids = [];' +
+    'for (var i=0;i<checks.length;i++){ if (checks[i].checked) ids.push(checks[i].value); }' +
+    'if (ids.length === 0) { alert("Check at least one toy for this group."); return; }' +
+    'toyGroups.push({ name: name, toyIds: ids });' +
+    'document.getElementById("newGroupName").value = "";' +
+    'for (var j=0;j<checks.length;j++){ checks[j].checked = false; }' +
+    'renderGroupList();' +
+    '}' +
+
+    'function testConnection(){' +
+    'var h = document.getElementById("host").value;' +
+    'var p = document.getElementById("port").value;' +
+    'var statusEl = document.getElementById("toyTestStatus");' +
+    'statusEl.textContent = "Testing...";' +
+    'var xhr = new XMLHttpRequest();' +
+    'xhr.open("POST", "http://"+h+":"+p+"/command", true);' +
+    'xhr.setRequestHeader("Content-Type", "application/json");' +
+    'xhr.timeout = 4000;' +
+    'xhr.onload = function(){' +
+    'try {' +
+    'var resp = JSON.parse(xhr.responseText);' +
+    'var count = (resp && resp.data && resp.data.toys) ? Object.keys(resp.data.toys).length : 0;' +
+    'statusEl.textContent = count > 0 ? (count + " toy(s) found.") : "Connected, but no toys found.";' +
+    '} catch (e) { statusEl.textContent = "Unexpected response."; }' +
+    '};' +
+    'xhr.onerror = function(){ statusEl.textContent = "Could not reach that address."; };' +
+    'xhr.ontimeout = function(){ statusEl.textContent = "Timed out."; };' +
+    'xhr.send(JSON.stringify({ command: "GetToys" }));' +
+    '}' +
+
+    'function testVibration(){' +
+    'var h = document.getElementById("host").value;' +
+    'var p = document.getElementById("port").value;' +
+    'var url = "http://"+h+":"+p+"/command";' +
+    'var statusEl = document.getElementById("toyTestStatus");' +
+    'statusEl.textContent = "Buzzing...";' +
+    'function send(body){' +
+    'var xhr = new XMLHttpRequest();' +
+    'xhr.open("POST", url, true);' +
+    'xhr.setRequestHeader("Content-Type", "application/json");' +
+    'xhr.timeout = 4000;' +
+    'xhr.send(JSON.stringify(body));' +
+    '}' +
+    'send({ command: "Function", action: "Vibrate:4", timeSec: 1, apiVer: 1 });' +
+    'setTimeout(function(){' +
+    'send({ command: "Function", action: "Vibrate:0", timeSec: 0, apiVer: 1 });' +
+    'statusEl.textContent = "Done.";' +
+    '}, 700);' +
+    '}' +
+
     'function save(){' +
     'var host=document.getElementById("host").value;' +
     'var port=document.getElementById("port").value;' +
     'var uiStyle=document.querySelector(\'input[name="uiStyle"]:checked\');' +
     'uiStyle=uiStyle?uiStyle.value:"basic";' +
+    'var discreteFace=document.querySelector(\'input[name="discreteFace"]:checked\');' +
+    'discreteFace=discreteFace?discreteFace.value:"analog";' +
+    'var batterySource=document.querySelector(\'input[name="batterySource"]:checked\');' +
+    'batterySource=batterySource?batterySource.value:"watch";' +
     'var result={' +
     'lovenseHost:host,' +
     'lovensePort:port,' +
     'uiStyle:uiStyle,' +
+    'discreteFace:discreteFace,' +
+    'batterySource:batterySource,' +
     'basicColorBg:document.getElementById("basicColorBg").value,' +
     'basicColorText:document.getElementById("basicColorText").value,' +
     'basicColorAccent:document.getElementById("basicColorAccent").value,' +
     'discreteColorBezel:document.getElementById("discreteColorBezel").value,' +
     'discreteColorBg:document.getElementById("discreteColorBg").value,' +
-    'discreteColorText:document.getElementById("discreteColorText").value' +
+    'discreteColorText:document.getElementById("discreteColorText").value,' +
+    'discreteColorActive:document.getElementById("discreteColorActive").value,' +
+    'settingsTheme:currentTheme,' +
+    'customPresets:JSON.stringify(customPresets),' +
+    'toyGroups:JSON.stringify(toyGroups)' +
     '};' +
     'document.location="pebblejs://close#"+encodeURIComponent(JSON.stringify(result));' +
-    '}</script></body></html>';
+    '}' +
+
+    'renderPresetGrid();' +
+    'renderGroupList();' +
+    '</script></body></html>';
 
   var url = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
   Pebble.openURL(url);
@@ -727,6 +1092,14 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.uiStyle !== undefined) {
       localStorage.setItem('lovenseUiStyle', settings.uiStyle);
       sendUiStyleToWatch(settings.uiStyle);
+    }
+    if (settings.discreteFace !== undefined) {
+      localStorage.setItem('discreteFace', settings.discreteFace);
+      sendDiscreteFaceToWatch(settings.discreteFace);
+    }
+    if (settings.batterySource !== undefined) {
+      localStorage.setItem('batterySource', settings.batterySource);
+      sendBatterySourceToWatch(settings.batterySource);
     }
     if (settings.basicColorBg !== undefined) {
       localStorage.setItem('basicColorBg', settings.basicColorBg);
@@ -753,6 +1126,20 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.discreteColorBezel !== undefined || settings.discreteColorBg !== undefined ||
         settings.discreteColorText !== undefined) {
       sendDiscreteColorsToWatch();
+    }
+    if (settings.discreteColorActive !== undefined) {
+      localStorage.setItem('discreteColorActive', settings.discreteColorActive);
+      sendDiscreteActiveColorToWatch();
+    }
+    if (settings.settingsTheme !== undefined) {
+      localStorage.setItem('settingsTheme', settings.settingsTheme);
+    }
+    if (settings.customPresets !== undefined) {
+      localStorage.setItem('customPresets', settings.customPresets);
+    }
+    if (settings.toyGroups !== undefined) {
+      localStorage.setItem('toyGroups', settings.toyGroups);
+      refreshToyListFromStorage();
     }
     console.log('Saved Lovense settings: ' + JSON.stringify(settings));
   } catch (err) {
