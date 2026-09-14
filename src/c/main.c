@@ -471,14 +471,11 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
                        tick_radius - tick_len, tick_len, s_discrete_muted_color);
   }
 
-  // Needle: true elapsed seconds while idle (reads as an ordinary running
-  // chronograph seconds sub-dial), vibration-level position otherwise -
-  // same idle/level split as 1b's hand, same color-independent-of-idle rule.
-  time_t now = time(NULL);
-  struct tm *t = localtime(&now);
-  int32_t needle_angle = s_idle
-    ? angle_for_fraction(t->tm_sec, 60)
-    : angle_for_fraction(s_intensity, 20);
+  // Needle always shows vibration level - no idle-revert here (unlike 1b's
+  // hand): Digital's main clock always shows real HH:MM:SS now, so the
+  // sub-dial doesn't need to also pretend to be an ordinary chronograph at
+  // rest.
+  int32_t needle_angle = angle_for_fraction(s_intensity, 20);
   draw_rotated_rect(ctx, center, needle_angle, needle_w, 0, needle_len, needle_color);
 
   graphics_context_set_fill_color(ctx, cap_color);
@@ -803,21 +800,17 @@ static void update_time_display(struct tm *tick_time) {
 
   if (s_discrete_face == DISCRETE_FACE_CHRONO && s_time_layer) {
     static char time_buf[16];
-    const char *time_fmt = clock_is_24h_style() ? "%H:%M" : "%I:%M";
+    const char *time_fmt = clock_is_24h_style() ? "%H:%M:%S" : "%I:%M:%S";
     strftime(time_buf, sizeof(time_buf), time_fmt, tick_time);
     text_layer_set_text(s_time_layer, time_buf);
   }
 
-  // The level indicator (1b's hand / 1d's needle) needs a redraw on every
-  // tick too, since while idle it sweeps real seconds.
-  if (s_discrete_face == DISCRETE_FACE_ANALOG) {
-    if (s_hands_layer) {
-      layer_mark_dirty(s_hands_layer);
-    }
-  } else {
-    if (s_subdial_layer) {
-      layer_mark_dirty(s_subdial_layer);
-    }
+  // Analog's hand needs a redraw on every tick too, since while idle it
+  // sweeps real seconds (and its hour/minute hands always track real time).
+  // The Digital sub-dial has no time-based behavior anymore - it only
+  // needs a redraw when level/pattern/active change, handled elsewhere.
+  if (s_discrete_face == DISCRETE_FACE_ANALOG && s_hands_layer) {
+    layer_mark_dirty(s_hands_layer);
   }
 }
 
@@ -834,10 +827,12 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
 static void apply_idle_state(void) {
   // Basic mode's tip layer no longer reacts to idle state - it always shows
   // TIP_DEFAULT_TEXT (still temporarily overridden by the separate 5s
-  // toy-name-reveal timer). Only Discrete mode needs real per-second ticks
-  // (to sweep the level hand/needle through real seconds while idle).
+  // toy-name-reveal timer). Digital always ticks per-second while active
+  // (its clock shows real seconds continuously now); Analog only ticks
+  // per-second while idle (to sweep its level hand through real seconds).
   tick_timer_service_unsubscribe();
-  bool need_seconds = s_idle && (s_ui_style == UI_STYLE_DISCRETE);
+  bool discrete_active = (s_ui_style == UI_STYLE_DISCRETE);
+  bool need_seconds = discrete_active && (s_discrete_face == DISCRETE_FACE_CHRONO || s_idle);
   tick_timer_service_subscribe(need_seconds ? SECOND_UNIT : MINUTE_UNIT, tick_handler);
   refresh_discrete_time();
 }

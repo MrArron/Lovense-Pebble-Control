@@ -181,22 +181,25 @@ All commands target whichever toy (or "All Toys") is currently selected.
     hand is muted whenever not vibrating (any level, including 0) and turns
     the active/pink color only while actively vibrating — to an observer
     it's just a second hand at a plausible position.
-  - **Digital** — digital `HH:MM` time with a day-of-week row, plus a
-    chronograph-style sub-dial at 6 o'clock whose needle encodes level
-    (angle = level⁄20 of a full turn) and whose ring/needle color follows the
-    same active/muted state rule as the Analog hand. Below it, a Steady/
-    Pulse/Wave register drawn as Roman numerals (I/II/III) with a marker
-    triangle on the selected pattern reads as an ordinary chronograph
-    totalizer.
+  - **Digital** — digital `HH:MM:SS` time (real, live seconds, ticking
+    continuously) with a day-of-week row, plus a chronograph-style sub-dial
+    at 6 o'clock whose needle *always* encodes vibration level (angle =
+    level⁄20 of a full turn — no idle-based behavior at all) and whose
+    ring/needle color follows the same active/muted state rule as the
+    Analog hand. Below it, a Steady/Pulse/Wave register drawn as Roman
+    numerals (I/II/III) with a marker triangle on the selected pattern
+    reads as an ordinary chronograph totalizer.
 
-  On both faces, the level indicator reverts to showing **true elapsed
-  seconds** (an ordinary running second hand / sweeping chrono sub-dial)
-  after the idle stand-down period with no button press, and snaps back to
-  the vibration-level position the instant a button is pressed — the same
-  "look ordinary at rest" idea 1a's digit-disguise used, just expressed as
-  hand position instead of a digit swap. Color (muted/active) always
-  reflects real vibration state regardless of idle, so the disguise never
-  hides *that* something is running, only *what number* it's at.
+  **Analog's** level hand reverts to showing **true elapsed seconds** (an
+  ordinary running second hand) after the idle stand-down period with no
+  button press, and snaps back to the vibration-level position the instant
+  a button is pressed — the same "look ordinary at rest" idea 1a's
+  digit-disguise used, just expressed as hand position instead of a digit
+  swap. Color (muted/active) always reflects real vibration state
+  regardless of idle. **Digital's** sub-dial doesn't need this same trick —
+  its main clock already always shows real time continuously, so the
+  disguise's "look ordinary at rest" job is already done; the sub-dial
+  needle just always shows level, full stop.
 
   A "BT" label + a small status dot (muted when connected, red when lost)
   plus a battery percentage sit in a status row on both faces; the label
@@ -317,16 +320,24 @@ target multiple specific toys at once (Remote 7.71.0+).
 
 ## Basic and Discrete mode colors
 
-The settings page has color pickers (a handful of preset swatches each, not
-a full picker) for:
+Basic and Discrete share **one color scheme** — background, text, and
+accent/bezel — not two independently-settable ones. On the wire and on
+persisted storage, they're still separate values (`basic_bg_color`/
+`discrete_bg_color` etc., six `AppMessage` keys / `PERSIST_KEY_BASIC_*` /
+`PERSIST_KEY_DISCRETE_*` on the watch, unchanged since day one), but the
+Custom tab's swatch rows write to both sides of each pair at once
+(`swatchRow()`'s `data-target` takes a space-separated list of hidden-input
+ids now, e.g. `"basicColorBg discreteColorBg"`), so a user only ever sees
+and picks three colors, not six, and the two display styles can't drift
+apart the way they used to. Discrete's bezel and Basic's accent are the
+same underlying role (bezel↔accent), matching how presets already treated
+them before this change.
 
-- **Basic mode**: background, text, and accent (pattern label + button bar
-  background), plus a persistent toy-name + battery row (battery source —
-  the watch's own or the currently selected toy's — is a separate setting).
-- **Discrete mode**: bezel, background, and text (used by both the Analog
-  and Digital faces — see "Display styles"), plus an independent **active
-  (vibrating) color** (default Lovense pink) shared by both faces and never
-  touched by presets.
+On top of that shared scheme: a persistent toy-name + battery row in Basic
+(battery source — watch's own or the selected toy's — is a separate
+setting), and an independent **active (vibrating) color** (default Lovense
+pink) used only by Discrete's two faces and never touched by presets or the
+shared scheme above (nothing in Basic mode needs a vibrating-state color).
 
 All of these are sent to the watch as hex strings (or ints for the discrete
 face / battery source choices), parsed into `GColor`s, and persisted
@@ -356,15 +367,23 @@ styles rather than needing to set six values by hand. The active/vibrating
 color is deliberately not part of any preset (built-in or custom) — it's a
 standalone always-pink-by-default setting a preset tap never overwrites.
 
-Custom reveals the same swatch pickers as before, now with more options per
-row (7-8 instead of 4-6) after the "give more freedom, keep white/black/an
-off-white as anchors" request. Lovense pink (`#FF2D89`, confirmed against
-Lovense's own site — both the built-in preset's bezel and the active-color
-swatch row now use this same value, replacing two earlier different guesses)
-is available both as a one-tap preset and as a standalone swatch in the
-bezel/background/text rows, so it can be mixed with any other color too.
-It's also this app's **default** color scheme on a fresh install, on both
-display styles, before Settings has ever been opened.
+Custom reveals three swatch rows — Background, Text, Accent/bezel — each
+merged from the old separate Basic/Discrete swatch lists (deduping
+near-identical colors that had drifted apart, e.g. two slightly different
+off-white creams) into one set per role, so the same color sits in the same
+position whether you're thinking of it as "Basic's accent" or "Discrete's
+bezel." Lovense pink (`#FF2D89`, confirmed against Lovense's own site) is
+available both as a one-tap preset and as a standalone swatch, so it can be
+mixed with any other color too. It's also this app's **default** color
+scheme on a fresh install, before Settings has ever been opened.
+
+Each preset tile's preview now renders a small mockup of whichever Discrete
+face is currently selected, using that preset's actual colors — a tiny
+CSS clock face (bezel-colored ring, background-colored dial, hour/minute/
+level hands in text/muted tone, fixed at a static "10:10"-style angle,
+not real time) for Analog, or a small rounded rect with a time readout and
+a sub-dial ring stand-in for Digital — instead of the earlier generic
+day-row/time/date approximation that didn't resemble either real face.
 
 Custom also has a **"Save as preset"** flow: name the current bezel/
 background/text combo and it's appended to the Presets grid with a delete
@@ -407,17 +426,26 @@ works out.  Recomputed whenever colors change (`apply_basic_colors`/
 
 ## Idle behavior
 
-**Discrete mode**: after 10 seconds with no button press, the level
-indicator (Analog's second hand / Digital's chrono needle) reverts to
-showing real, sweeping seconds — indistinguishable from an ordinary running
-second hand / chronograph sub-dial at rest. The watch switches from
-`MINUTE_UNIT` to `SECOND_UNIT` tick updates only while idle in Discrete
-mode, to avoid the battery cost of ticking every second all the time. Any
-button press immediately snaps the indicator back to the vibration-level
-position and restarts the 10s timer. Color (muted/active) is unaffected by
-idle state either way — only the hand's *position* is disguised, the same
-principle 1a's digit-swap used, just expressed as hand angle now that
-there's no "seconds" digit to swap.
+**Discrete mode, Analog face**: after 10 seconds with no button press, the
+level (second) hand reverts to showing real, sweeping seconds —
+indistinguishable from an ordinary running second hand at rest. Any button
+press immediately snaps it back to the vibration-level position and
+restarts the 10s timer. Color (muted/active) is unaffected by idle state
+either way — only the hand's *position* is disguised.
+
+**Discrete mode, Digital face**: no idle behavior at all — its clock always
+shows real, live `HH:MM:SS`, and its chrono sub-dial needle always shows
+vibration level, full stop. The main clock already does the "look ordinary
+at rest" job continuously, so the sub-dial doesn't need its own idle trick
+on top of it (earlier versions gave it one; removed once the clock itself
+started showing real seconds, since it became redundant).
+
+The watch switches from `MINUTE_UNIT` to `SECOND_UNIT` tick updates
+whenever *either* condition needs live seconds: Analog while idle, or
+Digital unconditionally while active (`apply_idle_state()`,
+`need_seconds = discrete_active && (s_discrete_face == DISCRETE_FACE_CHRONO || s_idle)`)
+— Basic mode and a paused/non-idle Analog face stay on `MINUTE_UNIT` to
+avoid the battery cost of ticking every second when nothing needs it.
 
 **Basic mode**: no idle behavior — removed after real-hardware feedback that
 it wasn't wanted there. Basic's tip text always shows the button-hint text

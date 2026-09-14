@@ -646,13 +646,13 @@ Pebble.addEventListener('showConfiguration', function () {
   var batteryWatchChecked = batterySource === 'watch' ? 'checked' : '';
   var batteryToyChecked = batterySource === 'toy' ? 'checked' : '';
 
+  // Basic's fields are the single source of truth for the unified Custom-tab
+  // swatches (see swatchRow() below) - Discrete's own basic_bg_color etc.
+  // are still sent/persisted separately on the wire, just always kept equal
+  // to these from here on.
   var basicBg = getSetting('basicColorBg', '#ffffff');
   var basicText = getSetting('basicColorText', '#000000');
   var basicAccent = getSetting('basicColorAccent', '#ff2d89');
-
-  var discreteBezel = getSetting('discreteColorBezel', '#ff2d89');
-  var discreteBg = getSetting('discreteColorBg', '#ffffff');
-  var discreteText = getSetting('discreteColorText', '#000000');
   var discreteActive = getSetting('discreteColorActive', '#ff2d89');
 
   var settingsTheme = getSetting('settingsTheme', 'dark');
@@ -683,13 +683,17 @@ Pebble.addEventListener('showConfiguration', function () {
     { name: 'Sand', bezel: '#aa5500', bg: '#ffffaa', text: '#550000' }
   ];
 
-  var BG_SWATCHES = ['#ffffff', '#111111', '#f5ecd8', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
-  var TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0', '#333333', '#c9a227'];
-  var ACCENT_SWATCHES = ['#e0245e', '#1d4e89', '#2e6b4f', '#5a3d7a', '#1a7a6e', '#c9691a', '#e4007c'];
-
-  var BEZEL_SWATCHES = ['#7a1f1f', '#1d4e89', '#2e6b4f', '#5a3d7a', '#333333', '#1a5f5f', '#e4007c'];
-  var DISCRETE_BG_SWATCHES = ['#f5e9a8', '#ffffff', '#111111', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
-  var DISCRETE_TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0', '#7a1f1f', '#c9a227'];
+  // One color scheme, shared by Basic and Discrete (a preset already always
+  // set both from the same three values - the Custom tab's swatch rows
+  // below now do the same, instead of tracking two independently-settable
+  // schemes that could drift apart). Merged from the old separate Basic/
+  // Discrete swatch arrays, deduping near-identical colors (e.g. the old
+  // BG_SWATCHES' #f5ecd8 and DISCRETE_BG_SWATCHES' #f5e9a8 were both an
+  // off-white cream) and keeping the "white/black/an off-white as anchors"
+  // ordering convention.
+  var BG_SWATCHES = ['#ffffff', '#111111', '#f5e9a8', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
+  var TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0', '#333333', '#7a1f1f', '#c9a227'];
+  var ACCENT_SWATCHES = ['#e0245e', '#7a1f1f', '#1d4e89', '#2e6b4f', '#5a3d7a', '#1a7a6e', '#333333', '#1a5f5f', '#c9691a', '#e4007c'];
   var ACTIVE_SWATCHES = ['#ff2d89', '#e0245e', '#ff3366', '#cc0044', '#ff6699', '#990033'];
 
   // Live snapshot of the toy state pkjs already holds, for the Toy tab -
@@ -709,14 +713,24 @@ Pebble.addEventListener('showConfiguration', function () {
   var eventsSocketStatus = s_eventsAccessGranted ? 'Connected (live events)' : 'Polling fallback';
   var aggregateStatus = s_lastKnownConnected ? 'Connected' : 'Not connected';
 
-  function swatchRow(name, options, current) {
-    var html = '<div class="swatch-row" data-target="' + name + '">';
+  // `names` may be a single id or a space-separated list (e.g.
+  // "basicColorBg discreteColorBg") - one swatch row can drive several
+  // underlying hidden fields at once, so Basic and Discrete stay in sync as
+  // one color scheme instead of two independently-settable ones. Space-
+  // separated (not comma) so CSS's word-match attribute selector (~=) can
+  // find this row given just one of its target ids - see setField().
+  function swatchRow(names, options, current) {
+    var ids = names.split(/\s+/);
+    var html = '<div class="swatch-row" data-target="' + names + '">';
     options.forEach(function (color) {
       var selected = (color.toLowerCase() === current.toLowerCase()) ? ' selected' : '';
       html += '<div class="swatch' + selected + '" data-color="' + color + '" ' +
         'style="background:' + color + '" onclick="pickColor(this)"></div>';
     });
-    html += '</div><input type="hidden" id="' + name + '" value="' + current + '">';
+    html += '</div>';
+    ids.forEach(function (id) {
+      html += '<input type="hidden" id="' + id + '" value="' + current + '">';
+    });
     return html;
   }
 
@@ -761,9 +775,14 @@ Pebble.addEventListener('showConfiguration', function () {
     '.preset-tile:not(.selected){opacity:0.7}' +
     '.preset-swatch{width:100%;aspect-ratio:1;border-radius:10px;padding:4px}' +
     '.preset-inner{width:100%;height:100%;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:monospace;overflow:hidden;padding:2px;box-sizing:border-box}' +
-    '.preset-days{font-size:4px;letter-spacing:0.5px;line-height:1.3}' +
-    '.preset-time{font-size:8px;font-weight:700;line-height:1.4}' +
-    '.preset-date{font-size:4px;line-height:1.3}' +
+    '.preset-inner.face-analog{border-radius:50%;position:relative;display:block}' +
+    '.preset-hand{position:absolute;left:50%;top:50%;transform-origin:50% 100%;border-radius:1px}' +
+    '.preset-hand-h{width:7%;height:26%;margin-left:-3.5%;margin-top:-26%}' +
+    '.preset-hand-m{width:5%;height:36%;margin-left:-2.5%;margin-top:-36%}' +
+    '.preset-hand-s{width:2.5%;height:36%;margin-left:-1.25%;margin-top:-36%}' +
+    '.preset-cap{position:absolute;left:50%;top:50%;width:10%;height:10%;margin-left:-5%;margin-top:-5%;border-radius:50%}' +
+    '.preset-digital-time{font-size:9px;font-weight:700;line-height:1.4}' +
+    '.preset-digital-ring{width:24%;aspect-ratio:1;border-radius:50%;border-width:2px;border-style:solid;margin-top:5%}' +
     '.preset-tile span{font-size:10px;color:var(--fg)}' +
     '.preset-del{position:absolute;top:-4px;right:-4px;width:18px;height:18px;line-height:18px;text-align:center;' +
     'background:#e74c3c;color:#fff;border-radius:50%;font-size:13px;z-index:2}' +
@@ -822,17 +841,15 @@ Pebble.addEventListener('showConfiguration', function () {
 
     '<div id="panel-custom" style="display:none">' +
     '<div class="card">' +
-    '<p class="title">Basic mode colors</p>' +
-    '<label>Background</label>' + swatchRow('basicColorBg', BG_SWATCHES, basicBg) +
-    '<label>Text</label>' + swatchRow('basicColorText', TEXT_SWATCHES, basicText) +
-    '<label>Accent (pattern label, button bar)</label>' + swatchRow('basicColorAccent', ACCENT_SWATCHES, basicAccent) +
+    '<p class="title">Colors</p>' +
+    '<p class="hint">One color scheme, used by both Basic and Discrete (both display styles switch together - same as tapping a preset).</p>' +
+    '<label>Background</label>' + swatchRow('basicColorBg discreteColorBg', BG_SWATCHES, basicBg) +
+    '<label>Text</label>' + swatchRow('basicColorText discreteColorText', TEXT_SWATCHES, basicText) +
+    '<label>Accent / bezel</label>' + swatchRow('basicColorAccent discreteColorBezel', ACCENT_SWATCHES, basicAccent) +
     '</div>' +
     '<div class="card">' +
-    '<p class="title">Discrete mode colors</p>' +
-    '<label>Bezel</label>' + swatchRow('discreteColorBezel', BEZEL_SWATCHES, discreteBezel) +
-    '<label>Background</label>' + swatchRow('discreteColorBg', DISCRETE_BG_SWATCHES, discreteBg) +
-    '<label>Text</label>' + swatchRow('discreteColorText', DISCRETE_TEXT_SWATCHES, discreteText) +
-    '<label>Active (vibrating signal) — shared by both discrete faces, not part of a preset</label>' +
+    '<p class="title">Active (vibrating signal)</p>' +
+    '<p class="hint">Shared by both discrete faces, not part of a preset.</p>' +
     swatchRow('discreteColorActive', ACTIVE_SWATCHES, discreteActive) +
     '</div>' +
     '<div class="card">' +
@@ -888,6 +905,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'var customPresets = (function(){try{return ' + (customPresetsRaw || '[]') + ';}catch(e){return [];}})();' +
     'var toyGroups = (function(){try{return ' + (toyGroupsRaw || '[]') + ';}catch(e){return [];}})();' +
     'var currentTheme = "' + settingsTheme + '";' +
+    'var discreteFace = "' + discreteFace + '";' +
 
     'function escapeHtml(s){' +
     'return String(s).replace(/[&<>]/g,function(c){if(c==="&")return"&amp;";if(c==="<")return"&lt;";return"&gt;";});' +
@@ -922,16 +940,22 @@ Pebble.addEventListener('showConfiguration', function () {
     'return text;' +
     '}' +
 
+    'function handDiv(cls, color, deg){' +
+    'return \'<div class="preset-hand \'+cls+\'" style="background:\'+color+\';transform:rotate(\'+deg+\'deg)"></div>\';' +
+    '}' +
+
     'function presetTileHtml(index, preset, isCustom){' +
     'var muted = getMuted(preset.bg, preset.text);' +
     'var del = isCustom ? \'<span class="preset-del" onclick="event.stopPropagation();deletePreset(\'+index+\')">&times;</span>\' : "";' +
+    'var inner;' +
+    'if (discreteFace === "chrono") {' +
+    'inner = \'<div class="preset-inner" style="background:\'+preset.bg+\'"><div class="preset-digital-time" style="color:\'+preset.text+\'">12:00</div><div class="preset-digital-ring" style="border-color:\'+muted+\'"></div></div>\';' +
+    '} else {' +
+    'inner = \'<div class="preset-inner face-analog" style="background:\'+preset.bg+\'">\'+handDiv("preset-hand-h",preset.text,300)+handDiv("preset-hand-m",preset.text,60)+handDiv("preset-hand-s",muted,200)+\'<div class="preset-cap" style="background:\'+preset.text+\'"></div></div>\';' +
+    '}' +
     'return \'<div class="preset-tile" onclick="applyPreset(\'+index+\')">\' + del +' +
-    '\'<div class="preset-swatch" style="background:\'+preset.bezel+\'">\' +' +
-    '\'<div class="preset-inner" style="background:\'+preset.bg+\'">\' +' +
-    '\'<div class="preset-days" style="color:\'+muted+\'">S M T <b style="color:\'+preset.text+\'">W</b> T F S</div>\' +' +
-    '\'<div class="preset-time" style="color:\'+preset.text+\'">20:49</div>\' +' +
-    '\'<div class="preset-date" style="color:\'+muted+\'">FRI 22</div>\' +' +
-    '\'</div></div><span>\'+escapeHtml(preset.name)+\'</span></div>\';' +
+    '\'<div class="preset-swatch" style="background:\'+preset.bezel+\'">\' + inner + \'</div>\' +' +
+    '\'<span>\'+escapeHtml(preset.name)+\'</span></div>\';' +
     '}' +
 
     'function renderPresetGrid(){' +
@@ -953,7 +977,7 @@ Pebble.addEventListener('showConfiguration', function () {
 
     'function setField(id, value){' +
     'document.getElementById(id).value = value;' +
-    'var row = document.querySelector(\'.swatch-row[data-target="\'+id+\'"]\');' +
+    'var row = document.querySelector(\'.swatch-row[data-target~="\'+id+\'"]\');' +
     'if(!row) return;' +
     'var swatches = row.getElementsByClassName("swatch");' +
     'for(var i=0;i<swatches.length;i++){' +
@@ -1015,11 +1039,12 @@ Pebble.addEventListener('showConfiguration', function () {
     '}' +
 
     'function wouldCollide(target, color){' +
-    'var pairs = [["basicColorBg","basicColorText"],["discreteColorBg","discreteColorText"]];' +
-    'for (var i=0;i<pairs.length;i++){' +
-    'var a=pairs[i][0], b=pairs[i][1];' +
-    'if (target===a){var other=document.getElementById(b).value; if(other.toLowerCase()===color.toLowerCase()) return true;}' +
-    'else if (target===b){var other2=document.getElementById(a).value; if(other2.toLowerCase()===color.toLowerCase()) return true;}' +
+    'var tokens = target.split(/\\s+/);' +
+    'if (tokens.indexOf("basicColorBg")!==-1){' +
+    'return document.getElementById("basicColorText").value.toLowerCase()===color.toLowerCase();' +
+    '}' +
+    'if (tokens.indexOf("basicColorText")!==-1){' +
+    'return document.getElementById("basicColorBg").value.toLowerCase()===color.toLowerCase();' +
     '}' +
     'return false;' +
     '}' +
@@ -1032,7 +1057,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'var swatches=row.getElementsByClassName("swatch");' +
     'for(var i=0;i<swatches.length;i++){swatches[i].className="swatch";}' +
     'el.className="swatch selected";' +
-    'document.getElementById(target).value=color;' +
+    'target.split(/\\s+/).forEach(function(id){document.getElementById(id).value=color;});' +
     '}' +
 
     'function toggleTheme(){' +
