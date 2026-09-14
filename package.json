@@ -1,7 +1,7 @@
 {
   "name": "lovense-remote",
   "author": "you",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
@@ -40,7 +40,7 @@
     "resources": {
       "media": [
         {
-          "file": "images/icon~bw.png",
+          "file": "images/icon-bw.png",
           "name": "MENU_ICON",
           "type": "bitmap",
           "memoryFormat": "1Bit",
@@ -48,7 +48,7 @@
           "targetPlatforms": ["aplite", "diorite"]
         },
         {
-          "file": "images/icon~color.png",
+          "file": "images/icon-color.png",
           "name": "MENU_ICON",
           "type": "bitmap",
           "menuIcon": true,

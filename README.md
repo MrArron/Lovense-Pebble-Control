@@ -42,7 +42,7 @@ three-state (connecting/connected/disconnected) BT status glyph that blinks
 while connecting and updates immediately if the toy-events socket drops
 mid-session. The default color scheme (both display styles) is now the
 "Lovense pink" preset, and the watch has a launcher icon based on Lovense's
-logo (`resources/images/icon~color.png` / `icon~bw.png`).
+logo (`resources/images/icon-color.png` / `icon-bw.png`).
 
 **Fixed this pass** (found via real-hardware testing): `GetToys`'s `toys`
 field is a JSON-**encoded string**, not a plain object — `Object.keys()` on
@@ -92,7 +92,7 @@ to change for any of the deferred features above.
   `resources.media` for the launcher icon). The button bar is still drawn
   in code, not loaded from a PNG - the only bundled image resource is the
   launcher icon itself (see `resources/images/`).
-- `resources/images/icon~color.png` / `icon~bw.png` — the watch's launcher
+- `resources/images/icon-color.png` / `icon-bw.png` — the watch's launcher
   icon shown in Pebble OS's app list, based on Lovense's logo in the app's
   Lovense-pink brand color (color platforms) and a black/white variant
   (Aplite/Diorite). Declared as `MENU_ICON` in `package.json`.
