@@ -9,6 +9,37 @@ which relays them as HTTP commands to the Lovense Remote app's local
 Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Remote app (Game Mode)  --BLE-->  Toy
 ```
 
+## Project status / where this was left off
+
+**Confirmed working on real Pebble Time 2 hardware** as of this checkpoint:
+boot (the `strtol()` root-cause fix holds), Basic mode (background/text/
+accent colors render correctly, contrast fix applied), Discrete mode
+(bezel/day-row/time/date/toy-name layout matches the mockups — BT/battery in
+top corners, time/date centered), the Presets tab (12 presets, correct
+initial-match highlighting, full mini-preview tiles), and the idle-revert
+behavior.
+
+**Untested**: the Chalk (round display) variant — no round hardware or
+emulator was available to verify it against.
+
+**Deferred, not yet built** (mocked up and discussed, explicitly queued as
+the next round of work): a **Toy Settings** screen (status, "Test
+connection"/"Test vibration" buttons, custom toy groups — confirmed feasible
+via the Lovense API's array `toy` field), a light/dark mode toggle for the
+settings page's own chrome, a three-state (connecting/connected/
+disconnected) toy-connection glyph, a persistent toy-name + battery row in
+Basic mode with a watch-vs-toy battery-source setting, "save custom colors
+as a new named preset," and preventing the same color being picked for text
+and background. Each is described in more detail in its relevant section
+below and in "Extending it" at the bottom.
+
+**To resume this work in a new session**, the most useful things to paste
+back in are: this README (has all the design decisions and reasoning), and
+either this zip or a description of what's changed since if you've made
+manual edits. The project's current UUID, message-key list, and persisted-
+storage key numbering are all in `package.json`/`main.c` and shouldn't need
+to change for any of the deferred features above.
+
 ## What's included
 
 - `src/c/main.c` — watchapp UI. UP/DOWN adjust intensity (0–20, steps of 2)
@@ -237,6 +268,37 @@ There's no "save my custom combo as a new preset" flow yet — presets are the
 text and background (which would make text invisible), are both queued for
 the next round; see "Extending it" below.
 
+Each preset tile is a genuine mini-preview of what the watch will actually
+show, not just a flat swatch: a day-of-week row (with a highlighted day),
+the full combined `HH:MM:SS` time row, a date row, and a line below it
+standing in for the toy-name reveal — using the same colors, in the same
+relative positions, as the real Discrete layout. The "muted" secondary
+tones in the preview (day letters, date) are computed the same way the
+watch computes them (see "Secondary color contrast" below) via a JS
+`blendHex()` that mirrors the watch's `blend_colors()`, so what you see in
+Settings should closely match what actually renders — though the watch's
+`GColor8` only has 4 levels per channel, so its exact shade may be a touch
+different from the phone preview's full 8-bit precision.
+
+## Secondary color contrast
+
+A few presets (Plum, Forest) pair a dark accent/bezel with a dark
+background, which made secondary text nearly unreadable — Discrete's
+day-row/date used a fixed muted color (`GColorArmyGreen`) that only looked
+right against a pale background, and Basic's pattern label used the raw
+accent color even when that accent had poor contrast against a dark
+background.
+
+Both are now computed dynamically instead of using a fixed constant:
+`blend_colors()` takes the 2-bit-per-channel RGB values from two `GColor8`s
+and averages them. Discrete's muted tone is `blend(background, text)`;
+Basic's pattern-label color is `blend(accent, text)`. Since blending toward
+`text` (which is chosen for contrast against the background already) pulls
+the result toward the readable end regardless of how dark the accent or
+background are, this needed no separate "is this too dark" check — it just
+works out.  Recomputed whenever colors change (`apply_basic_colors`/
+`apply_discrete_colors`) and once at boot after loading persisted colors.
+
 ## Idle behavior
 
 **Discrete mode**: after 10 seconds with no button press, the disguised
@@ -283,7 +345,7 @@ actual round hardware (Rebble's current SDK doesn't include a Chalk unit
 this project has access to) - the emulator is the only thing this has run
 against. Real-hardware layout tuning may be needed.
 
-## Edge-to-edge bezel (rectangular platforms)
+## Edge-to-edge bezel and layout corrections (rectangular platforms)
 
 The original bezel used a large outer corner radius (16px) that didn't
 reach the screen's true physical corners, leaving the window's background
@@ -291,7 +353,20 @@ color visible in a small gap at each corner on real Emery hardware - a bug
 reported on a physical Pebble Time 2. Fixed by shrinking the outer radius to
 4px (flush to the edge) while leaving the inner radius at 13px unchanged,
 per feedback that the larger inner curve looked better than a matching flush
-inner edge.
+inner edge. The bezel's ring thickness was separately widened from 4px to
+8px after real-hardware testing showed 4px reading as a thin outline rather
+than a visible bezel.
+
+Discrete mode's vertical layout was also corrected to match the original
+mockup after real-hardware testing showed BT/battery had drifted to the
+bottom corners (their position before this project's very first Discrete
+implementation, never actually updated to match later mockup iterations)
+instead of the top corners, which also left time/date sitting off-center
+rather than around the screen's true vertical middle. Current layout, top to
+bottom: BT/battery in the top corners (`status_row_y`), the day-of-week row
+just below them (`day_row_y`), then time/date/toy positioned relative to
+`center_y` now that the bottom of the screen isn't reserved for status
+glyphs.
 
 ## Memory optimizations and debug logging
 

@@ -511,11 +511,31 @@ Pebble.addEventListener('showConfiguration', function () {
     return html;
   }
 
+  function blendHex(hexA, hexB) {
+    // Mirrors the watch's blend_colors() - a plain RGB midpoint - so the
+    // preview's muted tones match what the watch will actually show,
+    // rather than a fixed color that only looks right on a pale background.
+    var a = { r: parseInt(hexA.substr(1, 2), 16), g: parseInt(hexA.substr(3, 2), 16), b: parseInt(hexA.substr(5, 2), 16) };
+    var b = { r: parseInt(hexB.substr(1, 2), 16), g: parseInt(hexB.substr(3, 2), 16), b: parseInt(hexB.substr(5, 2), 16) };
+    function h(n) {
+      n = Math.round(n);
+      n = Math.max(0, Math.min(255, n));
+      var s = n.toString(16);
+      return s.length === 1 ? '0' + s : s;
+    }
+    return '#' + h((a.r + b.r) / 2) + h((a.g + b.g) / 2) + h((a.b + b.b) / 2);
+  }
+
   function presetTile(index, preset) {
+    var muted = blendHex(preset.bg, preset.text);
     return '<div class="preset-tile" onclick="applyPreset(' + index + ')">' +
       '<div class="preset-swatch" style="background:' + preset.bezel + '">' +
-      '<div class="preset-inner" style="background:' + preset.bg + ';color:' + preset.text + '">20:49</div>' +
-      '</div><span>' + preset.name + '</span></div>';
+      '<div class="preset-inner" style="background:' + preset.bg + '">' +
+      '<div class="preset-days" style="color:' + muted + '">S M T <b style="color:' + preset.text + '">W</b> T F S</div>' +
+      '<div class="preset-time" style="color:' + preset.text + '">20:49:12</div>' +
+      '<div class="preset-date" style="color:' + muted + '">FRI 22</div>' +
+      '<div class="preset-toy" style="color:' + preset.text + '">Nora</div>' +
+      '</div></div><span>' + preset.name + '</span></div>';
   }
 
   var presetsHtml = PRESETS.map(function (p, i) { return presetTile(i, p); }).join('');
@@ -547,7 +567,11 @@ Pebble.addEventListener('showConfiguration', function () {
     '.preset-tile.selected .preset-swatch{box-shadow:0 0 0 2px #fff}' +
     '.preset-tile:not(.selected){opacity:0.7}' +
     '.preset-swatch{width:100%;aspect-ratio:1;border-radius:10px;padding:4px}' +
-    '.preset-inner{width:100%;height:100%;border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:9px;font-weight:700}' +
+    '.preset-inner{width:100%;height:100%;border-radius:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:monospace;overflow:hidden;padding:2px;box-sizing:border-box}' +
+    '.preset-days{font-size:4px;letter-spacing:0.5px;line-height:1.3}' +
+    '.preset-time{font-size:8px;font-weight:700;line-height:1.4}' +
+    '.preset-date{font-size:4px;line-height:1.3}' +
+    '.preset-toy{font-size:4px;line-height:1.3;margin-top:1px}' +
     '.preset-tile span{font-size:10px;color:#eee}' +
     'p.hint{font-size:12px;color:#aaa}' +
     '.disclaimer{border-top:0.5px solid #292929;margin-top:20px;padding-top:14px}' +

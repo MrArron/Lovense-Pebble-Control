@@ -96,12 +96,13 @@ static AppTimer *s_idle_timer = NULL;
 static GColor s_basic_bg_color;
 static GColor s_basic_text_color;
 static GColor s_basic_accent_color;
+static GColor s_basic_pattern_color; // computed - accent blended toward text, for readability on dark accents
 static GColor s_discrete_bezel_color;
 static GColor s_discrete_bg_color;
 static GColor s_discrete_text_color;
+static GColor s_discrete_muted_color; // computed - text blended toward background, for secondary elements
 
 static const GColor COLOR_TIME_ACTIVE = GColorRed; // fixed - this is the disguise's state signal
-static const GColor COLOR_LCD_MUTED = GColorArmyGreen; // fixed - secondary/muted elements only
 
 static const char *WEEKDAY_LETTERS[7] = { "S", "M", "T", "W", "T", "F", "S" };
 
@@ -152,6 +153,34 @@ static GColor color_from_packed(int packed) {
   return c;
 }
 
+static GColor blend_colors(GColor a, GColor b) {
+  // A plain 50/50 blend, done on GColor8's 2-bit-per-channel values (each
+  // channel is 0-3, representing 0/85/170/255). Used to derive "secondary"
+  // colors (a muted date/day-row tone, a readable pattern-label tint) from
+  // whatever colors are actually chosen, instead of a hardcoded constant
+  // that only looks right against a pale background.
+  GColor8 ca = a;
+  GColor8 cb = b;
+  int ar = (ca.argb >> 4) & 0x3;
+  int ag = (ca.argb >> 2) & 0x3;
+  int ab = ca.argb & 0x3;
+  int br = (cb.argb >> 4) & 0x3;
+  int bg = (cb.argb >> 2) & 0x3;
+  int bb = cb.argb & 0x3;
+  int r = ((ar + br + 1) / 2) * 85;
+  int g = ((ag + bg + 1) / 2) * 85;
+  int b_val = ((ab + bb + 1) / 2) * 85;
+  return GColorFromRGB(r, g, b_val);
+}
+
+static void recompute_discrete_muted(void) {
+  s_discrete_muted_color = blend_colors(s_discrete_bg_color, s_discrete_text_color);
+}
+
+static void recompute_basic_pattern_color(void) {
+  s_basic_pattern_color = blend_colors(s_basic_accent_color, s_basic_text_color);
+}
+
 // --- Discrete UI drawing ---
 
 static void frame_update_proc(Layer *layer, GContext *ctx) {
@@ -200,7 +229,7 @@ static void day_row_update_proc(Layer *layer, GContext *ctx) {
 
   for (int i = 0; i < 7; i++) {
     GRect cell = GRect(start_x + i * day_width, 0, day_width, bounds.size.h);
-    graphics_context_set_text_color(ctx, (i == s_current_wday) ? s_discrete_text_color : COLOR_LCD_MUTED);
+    graphics_context_set_text_color(ctx, (i == s_current_wday) ? s_discrete_text_color : s_discrete_muted_color);
     graphics_draw_text(ctx, WEEKDAY_LETTERS[i], font, cell,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
@@ -228,7 +257,7 @@ static void update_toy_connection_glyph(void) {
     return;
   }
   text_layer_set_text(s_bt_layer, "BT");
-  text_layer_set_text_color(s_bt_layer, s_toy_connected ? COLOR_LCD_MUTED : s_discrete_bezel_color);
+  text_layer_set_text_color(s_bt_layer, s_toy_connected ? s_discrete_muted_color : s_discrete_bezel_color);
 }
 
 static void toy_display_timeout_handler(void *data) {
@@ -333,6 +362,7 @@ static void button_bar_update_proc(Layer *layer, GContext *ctx) {
 }
 
 static void apply_basic_colors(void) {
+  recompute_basic_pattern_color();
   if (s_ui_style == UI_STYLE_BASIC) {
     window_set_background_color(s_window, s_basic_bg_color);
   }
@@ -342,11 +372,12 @@ static void apply_basic_colors(void) {
   text_layer_set_text_color(s_intensity_layer, s_basic_text_color);
   text_layer_set_text_color(s_status_layer, s_basic_text_color);
   text_layer_set_text_color(s_tip_layer, s_basic_text_color);
-  text_layer_set_text_color(s_pattern_layer, s_basic_accent_color);
+  text_layer_set_text_color(s_pattern_layer, s_basic_pattern_color);
   layer_mark_dirty(s_button_bar_layer);
 }
 
 static void apply_discrete_colors(void) {
+  recompute_discrete_muted();
   if (s_ui_style == UI_STYLE_DISCRETE) {
     window_set_background_color(s_window, s_discrete_bg_color);
   }
@@ -354,6 +385,8 @@ static void apply_discrete_colors(void) {
     return; // Discrete UI isn't currently built - just persisted for next time.
   }
   text_layer_set_text_color(s_toy_layer, s_discrete_text_color);
+  text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
+  update_toy_connection_glyph();
   layer_mark_dirty(s_frame_layer);
   layer_mark_dirty(s_day_row_layer);
   update_discrete_display();
@@ -678,13 +711,13 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
 
   s_bt_layer = text_layer_create(GRect(corner_margin, status_row_y, 40, 18));
   text_layer_set_background_color(s_bt_layer, GColorClear);
-  text_layer_set_text_color(s_bt_layer, COLOR_LCD_MUTED);
+  text_layer_set_text_color(s_bt_layer, s_discrete_muted_color);
   text_layer_set_font(s_bt_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   layer_add_child(s_discrete_container, text_layer_get_layer(s_bt_layer));
 
   s_battery_layer = text_layer_create(GRect(bounds.size.w - 40 - corner_margin, status_row_y, 40, 18));
   text_layer_set_background_color(s_battery_layer, GColorClear);
-  text_layer_set_text_color(s_battery_layer, COLOR_LCD_MUTED);
+  text_layer_set_text_color(s_battery_layer, s_discrete_muted_color);
   text_layer_set_font(s_battery_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
   text_layer_set_text_alignment(s_battery_layer, GTextAlignmentRight);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_battery_layer));
@@ -699,7 +732,7 @@ static void build_discrete_ui(Layer *window_layer, GRect bounds) {
 
   s_date_layer = text_layer_create(GRect(0, center_y + 28, bounds.size.w, 20));
   text_layer_set_background_color(s_date_layer, GColorClear);
-  text_layer_set_text_color(s_date_layer, COLOR_LCD_MUTED);
+  text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   text_layer_set_text(s_date_layer, "");
@@ -886,6 +919,9 @@ static void init(void) {
   s_discrete_text_color = persist_exists(PERSIST_KEY_DISCRETE_TEXT)
     ? color_from_packed(persist_read_int(PERSIST_KEY_DISCRETE_TEXT))
     : GColorBlack;
+
+  recompute_basic_pattern_color();
+  recompute_discrete_muted();
 
   s_window = window_create();
   window_set_window_handlers(s_window, (WindowHandlers) {
