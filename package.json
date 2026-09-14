@@ -1,7 +1,7 @@
 {
   "name": "lovense-remote",
   "author": "you",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
@@ -38,7 +38,23 @@
       "toy_battery"
     ],
     "resources": {
-      "media": []
+      "media": [
+        {
+          "file": "images/icon~bw.png",
+          "name": "MENU_ICON",
+          "type": "bitmap",
+          "memoryFormat": "1Bit",
+          "menuIcon": true,
+          "targetPlatforms": ["aplite", "diorite"]
+        },
+        {
+          "file": "images/icon~color.png",
+          "name": "MENU_ICON",
+          "type": "bitmap",
+          "menuIcon": true,
+          "targetPlatforms": ["basalt", "chalk", "emery"]
+        }
+      ]
     },
     "capabilities": [
       "configurable"

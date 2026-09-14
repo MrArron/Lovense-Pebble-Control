@@ -6,6 +6,18 @@
 
 var DEFAULT_PORT = '20010';
 
+// Escapes text before it's spliced into the generated settings-page HTML.
+// Needed anywhere a value could come from outside this device's own saved
+// settings - toy id/name come from the Lovense LAN API (GetToys/Events
+// socket), which is unauthenticated and spoofable by anything on the same
+// network, so a crafted id like `">script...` could otherwise break out of
+// an attribute and run script in the config webview.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
 function getSetting(key, fallback) {
   var val = localStorage.getItem(key);
   return (val === null || val === undefined || val === '') ? fallback : val;
@@ -122,7 +134,10 @@ function setToyListFromEntries(entries) {
   var list = [{ id: null, name: 'All Toys' }];
   var knownIds = {};
   (entries || []).forEach(function (t) {
-    var label = (t.nickName && t.nickName.length) ? t.nickName : t.name;
+    // GetToys' example uses 'nickName' (camelCase), the WebSocket Events
+    // API's uses 'nickname' (lowercase) - check both rather than guess.
+    var nick = t.nickName || t.nickname;
+    var label = (nick && nick.length) ? nick : t.name;
     list.push({ id: t.id, name: (label || t.id || '').substring(0, 20) });
     knownIds[t.id] = true;
     if (typeof t.battery === 'number') {
@@ -269,16 +284,45 @@ var s_isActive = false;
 var s_pollTimer = null;
 var s_lastKnownConnected = null;
 
-function reportToyConnected(connected) {
-  if (s_lastKnownConnected === connected) {
+// Tri-state BT glyph: values match the watch's BT_STATE_* enum exactly, so
+// they cross the existing toy_connected int key unchanged - no new
+// AppMessage key needed.
+var BT_CONNECTING = 0;
+var BT_CONNECTED = 1;
+var BT_DISCONNECTED = 2;
+var s_lastSentBtState = null;
+
+function sendBtState(state) {
+  if (state === s_lastSentBtState) {
     return;
   }
-  s_lastKnownConnected = connected;
-  queueAppMessage({ toy_connected: connected ? 1 : 0 }, function () {
+  s_lastSentBtState = state;
+  queueAppMessage({ toy_connected: state }, function () {
     // delivered
   }, function () {
-    console.log('Failed to send toy connection status to watch.');
+    console.log('Failed to send BT state to watch.');
   });
+}
+
+function reportToyConnected(connected) {
+  s_lastKnownConnected = connected;
+  sendBtState(connected ? BT_CONNECTED : BT_DISCONNECTED);
+}
+
+// GetToys' `data.toys` field is itself a JSON-encoded STRING, not a plain
+// object keyed by toy id (confirmed against Lovense's own API docs) -
+// Object.keys() on a raw string iterates its characters, not toy entries,
+// which is what caused both the "200 toy(s) found" test-connection bug and
+// the real toy's name never surfacing anywhere. Always double-parse.
+function parseToysField(raw) {
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) || {};
+    } catch (e) {
+      return {};
+    }
+  }
+  return raw && typeof raw === 'object' ? raw : {};
 }
 
 function checkToyConnection() {
@@ -294,7 +338,7 @@ function checkToyConnection() {
   xhr.onload = function () {
     try {
       var resp = JSON.parse(xhr.responseText);
-      var toys = (resp && resp.data && resp.data.toys) ? resp.data.toys : {};
+      var toys = parseToysField(resp && resp.data ? resp.data.toys : null);
       var entries = Object.keys(toys).map(function (id) {
         var t = toys[id];
         t.id = t.id || id;
@@ -408,8 +452,9 @@ function handleToyEvent(raw) {
       recomputeAggregateConnection();
       break;
     case 'battery-changed':
-      if (msg.toyId && msg.data && typeof msg.data.battery === 'number') {
-        s_toyBattery[msg.toyId] = msg.data.battery;
+      // Lovense's docs put the new value in data.value, not data.battery.
+      if (msg.toyId && msg.data && typeof msg.data.value === 'number') {
+        s_toyBattery[msg.toyId] = msg.data.value;
         sendToyBatteryIfChanged();
       }
       break;
@@ -453,6 +498,10 @@ function connectToyEvents() {
   };
   s_toySocket.onclose = function () {
     console.log('Toy Events socket closed - falling back to GetToys polling.');
+    // A reconnect is about to be attempted below - show "connecting" on the
+    // watch rather than a stale connected/disconnected reading until either
+    // the reconnect's events or the GetToys fallback resolve it for real.
+    sendBtState(BT_CONNECTING);
     s_eventsAccessGranted = false;
     stopSocketPing();
     if (s_isActive) {
@@ -493,10 +542,12 @@ function sendBatterySourceToWatch(source) {
 }
 
 function sendBasicColorsToWatch() {
+  // Defaults match the "Lovense pink" preset, so a fresh install looks the
+  // same on the watch whether or not Settings has ever been opened.
   queueAppMessage({
     basic_bg_color: getSetting('basicColorBg', '#ffffff'),
     basic_text_color: getSetting('basicColorText', '#000000'),
-    basic_accent_color: getSetting('basicColorAccent', '#e0245e')
+    basic_accent_color: getSetting('basicColorAccent', '#ff2d89')
   }, function () {
     // delivered
   }, function () {
@@ -506,8 +557,8 @@ function sendBasicColorsToWatch() {
 
 function sendDiscreteColorsToWatch() {
   queueAppMessage({
-    discrete_bezel_color: getSetting('discreteColorBezel', '#7a1f1f'),
-    discrete_bg_color: getSetting('discreteColorBg', '#f5e9a8'),
+    discrete_bezel_color: getSetting('discreteColorBezel', '#ff2d89'),
+    discrete_bg_color: getSetting('discreteColorBg', '#ffffff'),
     discrete_text_color: getSetting('discreteColorText', '#000000')
   }, function () {
     // delivered
@@ -518,7 +569,7 @@ function sendDiscreteColorsToWatch() {
 
 function sendDiscreteActiveColorToWatch() {
   queueAppMessage({
-    discrete_active_color: getSetting('discreteColorActive', '#ff0055')
+    discrete_active_color: getSetting('discreteColorActive', '#ff2d89')
   }, function () {
     // delivered
   }, function () {
@@ -597,12 +648,12 @@ Pebble.addEventListener('showConfiguration', function () {
 
   var basicBg = getSetting('basicColorBg', '#ffffff');
   var basicText = getSetting('basicColorText', '#000000');
-  var basicAccent = getSetting('basicColorAccent', '#e0245e');
+  var basicAccent = getSetting('basicColorAccent', '#ff2d89');
 
-  var discreteBezel = getSetting('discreteColorBezel', '#7a1f1f');
-  var discreteBg = getSetting('discreteColorBg', '#f5e9a8');
+  var discreteBezel = getSetting('discreteColorBezel', '#ff2d89');
+  var discreteBg = getSetting('discreteColorBg', '#ffffff');
   var discreteText = getSetting('discreteColorText', '#000000');
-  var discreteActive = getSetting('discreteColorActive', '#ff0055');
+  var discreteActive = getSetting('discreteColorActive', '#ff2d89');
 
   var settingsTheme = getSetting('settingsTheme', 'dark');
   var customPresetsRaw = getSetting('customPresets', '[]');
@@ -615,7 +666,7 @@ Pebble.addEventListener('showConfiguration', function () {
   // a preset - it's a separate, always-pink-by-default setting that presets
   // never touch (see the design handoff's color-role table).
   var PRESETS = [
-    { name: 'Lovense pink', bezel: '#e4007c', bg: '#ffffff', text: '#000000' },
+    { name: 'Lovense pink', bezel: '#ff2d89', bg: '#ffffff', text: '#000000' },
     { name: 'Classic', bezel: '#7a1f1f', bg: '#f5e9a8', text: '#000000' },
     { name: 'Midnight', bezel: '#16324f', bg: '#e8eef5', text: '#132a44' },
     { name: 'Forest', bezel: '#1f4d3a', bg: '#0f1f18', text: '#7be8b0' },
@@ -639,7 +690,7 @@ Pebble.addEventListener('showConfiguration', function () {
   var BEZEL_SWATCHES = ['#7a1f1f', '#1d4e89', '#2e6b4f', '#5a3d7a', '#333333', '#1a5f5f', '#e4007c'];
   var DISCRETE_BG_SWATCHES = ['#f5e9a8', '#ffffff', '#111111', '#16324f', '#1f4d3a', '#4a1942', '#0f4a4a', '#7a3010'];
   var DISCRETE_TEXT_SWATCHES = ['#000000', '#ffffff', '#132a44', '#7be8b0', '#7a1f1f', '#c9a227'];
-  var ACTIVE_SWATCHES = ['#ff0055', '#e0245e', '#ff3366', '#cc0044', '#ff6699', '#990033'];
+  var ACTIVE_SWATCHES = ['#ff2d89', '#e0245e', '#ff3366', '#cc0044', '#ff6699', '#990033'];
 
   // Live snapshot of the toy state pkjs already holds, for the Toy tab -
   // config pages have no round-trip back into pkjs while open, so this is
@@ -671,9 +722,11 @@ Pebble.addEventListener('showConfiguration', function () {
 
   var knownToysHtml = knownToys.length ? knownToys.map(function (t) {
     var dot = t.connected === null ? '#666' : (t.connected ? '#2ecc71' : '#e74c3c');
+    // t.id/t.name come from the Lovense LAN API (unauthenticated, spoofable
+    // by anything on the network) - always escape before splicing into HTML.
     return '<div class="toy-row"><span class="toy-dot" style="background:' + dot + '"></span>' +
-      '<span class="toy-row-name">' + t.name + '</span><span class="toy-row-batt">' + t.battery + '</span>' +
-      '<label class="toy-check"><input type="checkbox" class="group-member" value="' + t.id + '"> in group</label></div>';
+      '<span class="toy-row-name">' + escapeHtml(t.name) + '</span><span class="toy-row-batt">' + escapeHtml(t.battery) + '</span>' +
+      '<label class="toy-check"><input type="checkbox" class="group-member" value="' + escapeHtml(t.id) + '"> in group</label></div>';
   }).join('') : '<p class="hint">No toys known yet - open Lovense Remote and connect one, or just save the IP/port above and come back.</p>';
 
   var html = '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">' +
@@ -836,6 +889,10 @@ Pebble.addEventListener('showConfiguration', function () {
     'var toyGroups = (function(){try{return ' + (toyGroupsRaw || '[]') + ';}catch(e){return [];}})();' +
     'var currentTheme = "' + settingsTheme + '";' +
 
+    'function escapeHtml(s){' +
+    'return String(s).replace(/[&<>]/g,function(c){if(c==="&")return"&amp;";if(c==="<")return"&lt;";return"&gt;";});' +
+    '}' +
+
     'function blendHex(hexA, hexB){' +
     'var a={r:parseInt(hexA.substr(1,2),16),g:parseInt(hexA.substr(3,2),16),b:parseInt(hexA.substr(5,2),16)};' +
     'var b={r:parseInt(hexB.substr(1,2),16),g:parseInt(hexB.substr(3,2),16),b:parseInt(hexB.substr(5,2),16)};' +
@@ -845,8 +902,28 @@ Pebble.addEventListener('showConfiguration', function () {
 
     'function allPresets(){return BUILTIN_PRESETS.concat(customPresets);}' +
 
+    'function getLum(h){' +
+    'var f=function(c){return c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4);};' +
+    'return 0.2126*f(parseInt(h.substr(1,2),16)/255)+0.7152*f(parseInt(h.substr(3,2),16)/255)+0.0722*f(parseInt(h.substr(5,2),16)/255);' +
+    '}' +
+    'function contrast(a,b){' +
+    'var la=getLum(a)+0.05,lb=getLum(b)+0.05;' +
+    'return la>lb?la/lb:lb/la;' +
+    '}' +
+    'function blendHexW(a,b,w){' +
+    'var A=[parseInt(a.substr(1,2),16),parseInt(a.substr(3,2),16),parseInt(a.substr(5,2),16)];' +
+    'var B=[parseInt(b.substr(1,2),16),parseInt(b.substr(3,2),16),parseInt(b.substr(5,2),16)];' +
+    'var hx=function(n){n=Math.max(0,Math.min(255,Math.round(n)));var s=n.toString(16);return s.length===1?"0"+s:s;};' +
+    'return "#"+hx(A[0]*w+B[0]*(1-w))+hx(A[1]*w+B[1]*(1-w))+hx(A[2]*w+B[2]*(1-w));' +
+    '}' +
+    'function getMuted(bg,text){' +
+    'var ws=[0.5,0.3,0.15];' +
+    'for(var i=0;i<ws.length;i++){var m=blendHexW(bg,text,ws[i]);if(contrast(m,bg)>=2.5)return m;}' +
+    'return text;' +
+    '}' +
+
     'function presetTileHtml(index, preset, isCustom){' +
-    'var muted = blendHex(preset.bg, preset.text);' +
+    'var muted = getMuted(preset.bg, preset.text);' +
     'var del = isCustom ? \'<span class="preset-del" onclick="event.stopPropagation();deletePreset(\'+index+\')">&times;</span>\' : "";' +
     'return \'<div class="preset-tile" onclick="applyPreset(\'+index+\')">\' + del +' +
     '\'<div class="preset-swatch" style="background:\'+preset.bezel+\'">\' +' +
@@ -854,7 +931,7 @@ Pebble.addEventListener('showConfiguration', function () {
     '\'<div class="preset-days" style="color:\'+muted+\'">S M T <b style="color:\'+preset.text+\'">W</b> T F S</div>\' +' +
     '\'<div class="preset-time" style="color:\'+preset.text+\'">20:49</div>\' +' +
     '\'<div class="preset-date" style="color:\'+muted+\'">FRI 22</div>\' +' +
-    '\'</div></div><span>\'+preset.name+\'</span></div>\';' +
+    '\'</div></div><span>\'+escapeHtml(preset.name)+\'</span></div>\';' +
     '}' +
 
     'function renderPresetGrid(){' +
@@ -971,7 +1048,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'function renderGroupList(){' +
     'var html = toyGroups.length ? "" : \'<p class="hint">No groups saved yet.</p>\';' +
     'for (var i=0;i<toyGroups.length;i++){' +
-    'html += \'<div class="group-row"><span>\'+toyGroups[i].name+\' (\'+toyGroups[i].toyIds.length+\')</span>\'+' +
+    'html += \'<div class="group-row"><span>\'+escapeHtml(toyGroups[i].name)+\' (\'+toyGroups[i].toyIds.length+\')</span>\'+' +
     '\'<span class="group-del" onclick="deleteGroup(\'+i+\')">&times;</span></div>\';' +
     '}' +
     'document.getElementById("groupList").innerHTML = html;' +
@@ -1007,7 +1084,9 @@ Pebble.addEventListener('showConfiguration', function () {
     'xhr.onload = function(){' +
     'try {' +
     'var resp = JSON.parse(xhr.responseText);' +
-    'var count = (resp && resp.data && resp.data.toys) ? Object.keys(resp.data.toys).length : 0;' +
+    'var raw = (resp && resp.data) ? resp.data.toys : null;' +
+    'var toysObj = typeof raw === "string" ? JSON.parse(raw) : (raw || {});' +
+    'var count = Object.keys(toysObj).length;' +
     'statusEl.textContent = count > 0 ? (count + " toy(s) found.") : "Connected, but no toys found.";' +
     '} catch (e) { statusEl.textContent = "Unexpected response."; }' +
     '};' +
