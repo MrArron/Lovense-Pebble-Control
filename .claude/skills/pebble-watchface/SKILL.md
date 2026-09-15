@@ -98,10 +98,11 @@ Ask the user (use AskUserQuestion if unclear):
 - **Weather/Web data**: Does it need weather or other internet data?
 
 ### Study Existing Code
-The subagent should read and analyze:
-- `samples/aqua-pbw/src/c/main.c` — animated watchface patterns
-- `tutorials/c-watchface-tutorial/part1/` — basic time + date
-- `tutorials/c-watchface-tutorial/part4/` — weather via AppMessage + pkjs
+Not bundled locally (see "Tutorial Reference" below for why) - clone
+these separately if needed:
+- `samples/aqua-pbw/src/c/main.c` from this skill's own repo — animated watchface patterns
+- `tutorials/c-watchface-tutorial/part1/` from coredevices/c-watchface-tutorial — basic time + date
+- `tutorials/c-watchface-tutorial/part4/` from coredevices/c-watchface-tutorial — weather via AppMessage + pkjs
 
 Key patterns to extract:
 - Data structures for animated elements
@@ -629,7 +630,7 @@ Pebble.addEventListener('appmessage', function(e) {
 });
 ```
 
-See `tutorials/c-watchface-tutorial/part4/` for a complete working example.
+See `tutorials/c-watchface-tutorial/part4/` in coredevices/c-watchface-tutorial (not bundled locally) for a complete working example.
 
 ### Visual Weather Reactions (C Side)
 
@@ -672,15 +673,20 @@ This gives a different scene each minute without burning battery on sub-second r
 
 ## Tutorial Reference
 
-Complete working tutorial examples are in `tutorials/c-watchface-tutorial/`:
+Complete working tutorial examples live at
+[coredevices/c-watchface-tutorial](https://github.com/coredevices/c-watchface-tutorial)
+(not bundled locally - each part is its own standalone buildable project
+with its own `package.json`/`wscript`, which is exactly the kind of thing
+that must never sit inside an actual project's repo: a build tool or
+CloudPebble import pointed at the wrong directory will happily build and
+install *that* app instead of the real one. Clone the tutorial repo
+separately if you need to read one of these):
 
 | Part | What It Teaches |
 |------|-----------------|
 | part1 | Basic time + date display with system fonts |
 | part4 | Weather via AppMessage + PebbleKit JS + Open-Meteo API |
 | part6 | User settings via Clay configuration framework |
-
-These are sourced from [coredevices/c-watchface-tutorial](https://github.com/coredevices/c-watchface-tutorial).
 
 The Alloy equivalent is [coredevices/alloy-watchface-tutorial](https://github.com/coredevices/alloy-watchface-tutorial) (part1 basic Poco face → part2 custom fonts → part3 battery/BT → part4 weather via watch-side fetch → part5 Quick View → part6 Clay settings + localStorage). Its part1 is captured verbatim in `templates/alloy-*`.
 
