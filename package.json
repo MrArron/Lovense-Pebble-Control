@@ -1,7 +1,7 @@
 {
   "name": "lovense-remote",
   "author": "you",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
@@ -9,12 +9,14 @@
     "displayName": "Lovense Remote",
     "uuid": "ecd0256e-959e-4f3f-8077-a8ecd37856e0",
     "sdkVersion": "3",
+    "enableMultiJS": true,
     "targetPlatforms": [
       "aplite",
       "basalt",
       "chalk",
       "diorite",
-      "emery"
+      "emery",
+      "flint"
     ],
     "watchapp": {
       "watchface": false
@@ -35,29 +37,22 @@
       "discrete_active_color",
       "discrete_face",
       "battery_source",
-      "toy_battery"
+      "toy_battery",
+      "secondary_display"
     ],
     "resources": {
       "media": [
         {
-          "file": "images/icon-bw.png",
+          "file": "images/icon.png",
           "name": "MENU_ICON",
           "type": "bitmap",
-          "memoryFormat": "1Bit",
-          "menuIcon": true,
-          "targetPlatforms": ["aplite", "diorite"]
-        },
-        {
-          "file": "images/icon-color.png",
-          "name": "MENU_ICON",
-          "type": "bitmap",
-          "menuIcon": true,
-          "targetPlatforms": ["basalt", "chalk", "emery"]
+          "menuIcon": true
         }
       ]
     },
     "capabilities": [
-      "configurable"
+      "configurable",
+      "health"
     ]
   }
 }

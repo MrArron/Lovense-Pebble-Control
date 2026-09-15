@@ -24,7 +24,7 @@ Built with the assistance of Claude (Claude Sonnet 5, Anthropic).
 
 ## Icon
 
-`resources/images/icon-color.png` (color platforms) /
-`resources/images/icon-bw.png` (Aplite/Diorite) — the same "L" mark used as
+`resources/images/icon~color.png` (color platforms) /
+`resources/images/icon~bw.png` (Aplite/Diorite) — the same "L" mark used as
 the in-app menu icon (`MENU_ICON` in `package.json`), based on Lovense's
 own logo, recolored to Lovense's brand pink (`#FF2D89`).

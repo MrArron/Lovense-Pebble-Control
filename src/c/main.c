@@ -28,6 +28,9 @@
 #define BATTERY_SOURCE_WATCH 0
 #define BATTERY_SOURCE_TOY 1
 
+#define SECONDARY_DISPLAY_DATE 0
+#define SECONDARY_DISPLAY_STEPS 1
+
 #define BT_STATE_CONNECTING 0
 #define BT_STATE_CONNECTED 1
 #define BT_STATE_DISCONNECTED 2
@@ -43,8 +46,9 @@
 #define PERSIST_KEY_DISCRETE_ACTIVE 8
 #define PERSIST_KEY_DISCRETE_FACE 9
 #define PERSIST_KEY_BATTERY_SOURCE 10
+#define PERSIST_KEY_SECONDARY_DISPLAY 11
 
-#define TIP_DEFAULT_TEXT "Hold UP/DOWN\nto change pattern\nHold SELECT: toy"
+#define TIP_DEFAULT_TEXT "Hold UP/DOWN: pattern\nHold SELECT: toy"
 
 #define PATTERN_STEADY 0
 #define PATTERN_PULSE 1
@@ -113,8 +117,10 @@ static Layer *s_subdial_layer;    // 1d only - ring + ticks + needle + cap
 static Layer *s_register_layer;   // 1d/rect only - Steady/Pulse/Wave totalizer
 static TextLayer *s_time_layer;   // 1d only - digital "HH:MM"
 static TextLayer *s_date_layer;   // both faces - also doubles as the toy-name reveal target
+static Layer *s_secondary_icon_layer; // both faces - walking-person glyph, steps mode only
 static char s_date_text[24] = ""; // last real date string, restored after a toy-name reveal
 static AppTimer *s_toy_display_timer = NULL;
+static GRect s_date_frame_full; // date_layer's original full-width frame, before any steps-mode shift
 static int s_current_wday = 0; // 0=Sunday, read by the day-row draw callback
 
 static int s_intensity = 0;
@@ -127,6 +133,7 @@ static AppTimer *s_bt_blink_timer = NULL;
 static bool s_bt_blink_on = false;
 static char s_toy_name[24] = "All Toys";
 static int s_battery_source = BATTERY_SOURCE_WATCH;
+static int s_secondary_display = SECONDARY_DISPLAY_DATE;
 static int s_toy_battery = -1; // 0-100, or -1 = unknown (not persisted - meaningless until resent)
 
 // Idle behavior is Discrete-only now (the level hand/needle reverting to
@@ -535,6 +542,42 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
+// Minimalist walking-person pictogram - vector-drawn like the app's other
+// glyphs (BT icon, button chevrons, pattern-register triangles), not a
+// bitmap resource or emoji: Pebble's public system fonts have no emoji
+// glyphs available to third-party apps.
+static void secondary_icon_update_proc(Layer *layer, GContext *ctx) {
+  // Digital-only (this layer is never built for Analog - see build_analog_face).
+  if (s_secondary_display != SECONDARY_DISPLAY_STEPS || s_discrete_face != DISCRETE_FACE_CHRONO) {
+    return; // date mode - icon column stays blank
+  }
+  GRect bounds = layer_get_bounds(layer);
+  int16_t cx = (int16_t)(bounds.size.w / 2);
+
+  graphics_context_set_fill_color(ctx, s_discrete_muted_color);
+  graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
+  graphics_context_set_stroke_width(ctx, 2);
+
+  graphics_fill_circle(ctx, GPoint(cx, 3), 2); // head
+  graphics_draw_line(ctx, GPoint(cx, 6), GPoint(cx, 11)); // torso
+  graphics_draw_line(ctx, GPoint(cx, 8), GPoint((int16_t)(cx + 3), 6)); // arm, swung forward
+  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx - 4), (int16_t)(bounds.size.h - 1))); // back leg
+  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx + 3), (int16_t)(bounds.size.h - 4))); // front leg, mid-stride
+}
+
+// Shared by both discrete faces: a small square icon column at the left
+// edge of the date row, matching the row's own height. Only visible in
+// steps mode (secondary_icon_update_proc no-ops otherwise); date mode's
+// centered text is completely unaffected since it still spans the row's
+// full original width.
+static void build_secondary_icon(GRect date_frame) {
+  GRect icon_frame = GRect(date_frame.origin.x, date_frame.origin.y,
+                            date_frame.size.h, date_frame.size.h);
+  s_secondary_icon_layer = layer_create(icon_frame);
+  layer_set_update_proc(s_secondary_icon_layer, secondary_icon_update_proc);
+  layer_add_child(s_discrete_container, s_secondary_icon_layer);
+}
+
 static void bt_blink_handler(void *data) {
   s_bt_blink_on = !s_bt_blink_on;
   if (s_status_row_layer) {
@@ -786,8 +829,17 @@ static void update_time_display(struct tm *tick_time) {
     return;
   }
 
+  // Steps mode is Digital-only - a walking icon crowded next to the Analog
+  // clock face looked bad, so Analog always shows the date regardless of
+  // the secondary_display setting.
+  bool show_steps = (s_secondary_display == SECONDARY_DISPLAY_STEPS)
+                     && (s_discrete_face == DISCRETE_FACE_CHRONO);
+
   static char date_buf[24];
-  if (s_discrete_face == DISCRETE_FACE_ANALOG) {
+  if (show_steps) {
+    HealthValue steps = health_service_peek_current_value(HealthMetricStepCount);
+    snprintf(date_buf, sizeof(date_buf), "%d", (int)steps);
+  } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
     strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
   } else {
     strftime(date_buf, sizeof(date_buf), "%a %d %b", tick_time);
@@ -795,7 +847,21 @@ static void update_time_display(struct tm *tick_time) {
   strncpy(s_date_text, date_buf, sizeof(s_date_text) - 1);
   s_date_text[sizeof(s_date_text) - 1] = '\0';
   if (s_date_layer && !s_toy_display_timer) { // don't clobber an active toy-name reveal
+    if (show_steps) {
+      int16_t icon_w = s_date_frame_full.size.h;
+      GRect steps_frame = GRect((int16_t)(s_date_frame_full.origin.x + icon_w),
+                                 s_date_frame_full.origin.y,
+                                 (int16_t)(s_date_frame_full.size.w - icon_w),
+                                 s_date_frame_full.size.h);
+      layer_set_frame(text_layer_get_layer(s_date_layer), steps_frame);
+    } else {
+      layer_set_frame(text_layer_get_layer(s_date_layer), s_date_frame_full);
+    }
+    text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
     text_layer_set_text(s_date_layer, s_date_text);
+  }
+  if (s_secondary_icon_layer) {
+    layer_mark_dirty(s_secondary_icon_layer);
   }
 
   if (s_discrete_face == DISCRETE_FACE_CHRONO && s_time_layer) {
@@ -1026,9 +1092,17 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
   layer_add_child(s_basic_container, text_layer_get_layer(s_pattern_layer));
 
 #if defined(PBL_ROUND)
-  s_tip_layer = text_layer_create(GRect(content_x + 4, content_h - 30, basic_width - 8, 28));
+  s_tip_layer = text_layer_create(GRect(content_x + 4, content_h - 30, basic_width - 8, 34));
 #else
-  s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 50, basic_width - 4, 42));
+  // Anchored to s_pattern_layer's own bottom edge (content_h/2 + 42) rather
+  // than an independently-tuned bounds.size.h offset, so the two stay
+  // non-overlapping on any screen height instead of two constants that only
+  // happened to work on Emery - aplite/basalt/diorite (168px tall) were
+  // already overlapping pattern_layer by 8px before this change.
+  int pattern_bottom = content_h / 2 + 42;
+  int tip_top = pattern_bottom + 4;
+  int tip_bottom = bounds.size.h - 8; // keep clear of the physical bezel
+  s_tip_layer = text_layer_create(GRect(2, tip_top, basic_width - 4, tip_bottom - tip_top));
 #endif
   text_layer_set_background_color(s_tip_layer, GColorClear);
   text_layer_set_font(s_tip_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
@@ -1098,6 +1172,10 @@ static void build_analog_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
+  s_date_frame_full = date_frame; // update_time_display resets the frame to this every tick
+  // Steps mode is Digital-only (main.c: update_time_display) - the walking
+  // icon looked bad crowded next to the analog clock face, so Analog never
+  // builds the icon layer and always shows the date regardless of setting.
 
   s_status_row_layer = layer_create(status_frame);
   layer_set_update_proc(s_status_row_layer, status_row_update_proc);
@@ -1146,6 +1224,8 @@ static void build_chrono_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
+  build_secondary_icon(date_frame);
+  s_date_frame_full = date_frame;
 
   s_subdial_layer = layer_create(subdial_frame);
   layer_set_update_proc(s_subdial_layer, chrono_subdial_update_proc);
@@ -1202,6 +1282,10 @@ static void teardown_discrete_ui(void) {
   if (s_date_layer) {
     text_layer_destroy(s_date_layer);
     s_date_layer = NULL;
+  }
+  if (s_secondary_icon_layer) {
+    layer_destroy(s_secondary_icon_layer);
+    s_secondary_icon_layer = NULL;
   }
   if (s_hands_layer) {
     layer_destroy(s_hands_layer);
@@ -1316,6 +1400,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     update_basic_toy_row();
   }
 
+  Tuple *secondary_display_tuple = dict_find(iterator, MESSAGE_KEY_secondary_display);
+  if (secondary_display_tuple) {
+    s_secondary_display = (int)secondary_display_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_SECONDARY_DISPLAY, s_secondary_display);
+    refresh_discrete_time();
+  }
+
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
   if (bg_tuple) {
     s_basic_bg_color = parse_hex_color(bg_tuple->value->cstring);
@@ -1427,6 +1518,9 @@ static void init(void) {
   s_battery_source = persist_exists(PERSIST_KEY_BATTERY_SOURCE)
     ? persist_read_int(PERSIST_KEY_BATTERY_SOURCE)
     : BATTERY_SOURCE_WATCH;
+  s_secondary_display = persist_exists(PERSIST_KEY_SECONDARY_DISPLAY)
+    ? persist_read_int(PERSIST_KEY_SECONDARY_DISPLAY)
+    : SECONDARY_DISPLAY_DATE;
 
   recompute_basic_pattern_color();
   recompute_discrete_muted();
