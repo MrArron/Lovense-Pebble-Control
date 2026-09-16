@@ -30,6 +30,18 @@ function getSetting(key, fallback) {
   return (val === null || val === undefined || val === '') ? fallback : val;
 }
 
+// Like getSetting(), but for a fixed set of valid string values (radio
+// groups) - also falls back when the stored value is present but isn't one
+// of validValues, e.g. a leftover value from a previous version of this
+// setting (a boolean checkbox saved "true"/"false" as a plain string before
+// a later version turned it into a 3-way radio group). Without this, a
+// stale value that doesn't match any option leaves the whole group
+// unchecked in the rendered HTML instead of showing the default.
+function getEnumSetting(key, validValues, fallback) {
+  var val = getSetting(key, fallback);
+  return validValues.indexOf(val) !== -1 ? val : fallback;
+}
+
 function buildUrl() {
   var host = getSetting('lovenseHost', '');
   var port = getSetting('lovensePort', DEFAULT_PORT);
@@ -661,24 +673,24 @@ Pebble.addEventListener('appmessage', function (e) {
 Pebble.addEventListener('showConfiguration', function () {
   var host = encodeURIComponent(getSetting('lovenseHost', ''));
   var port = encodeURIComponent(getSetting('lovensePort', DEFAULT_PORT));
-  var uiStyle = getSetting('lovenseUiStyle', 'basic');
+  var uiStyle = getEnumSetting('lovenseUiStyle', ['basic', 'discrete'], 'basic');
   var basicChecked = uiStyle === 'basic' ? 'checked' : '';
   var discreteChecked = uiStyle === 'discrete' ? 'checked' : '';
 
-  var discreteFace = getSetting('discreteFace', 'analog');
+  var discreteFace = getEnumSetting('discreteFace', ['analog', 'chrono'], 'analog');
   var faceAnalogChecked = discreteFace === 'analog' ? 'checked' : '';
   var faceChronoChecked = discreteFace === 'chrono' ? 'checked' : '';
 
-  var batterySource = getSetting('batterySource', 'watch');
+  var batterySource = getEnumSetting('batterySource', ['watch', 'toy'], 'watch');
   var batteryWatchChecked = batterySource === 'watch' ? 'checked' : '';
   var batteryToyChecked = batterySource === 'toy' ? 'checked' : '';
 
-  var secondaryDisplay = getSetting('secondaryDisplay', 'date');
+  var secondaryDisplay = getEnumSetting('secondaryDisplay', ['date', 'steps', 'heartrate'], 'date');
   var secondaryDateChecked = secondaryDisplay === 'date' ? 'checked' : '';
   var secondaryStepsChecked = secondaryDisplay === 'steps' ? 'checked' : '';
   var secondaryHeartrateChecked = secondaryDisplay === 'heartrate' ? 'checked' : '';
 
-  var touchPlayMode = getSetting('touchPlayMode', 'accel');
+  var touchPlayMode = getEnumSetting('touchPlayMode', ['accel', 'touchscreen', 'off'], 'accel');
   var touchAccelChecked = touchPlayMode === 'accel' ? 'checked' : '';
   var touchScreenChecked = touchPlayMode === 'touchscreen' ? 'checked' : '';
   var touchOffChecked = touchPlayMode === 'off' ? 'checked' : '';
