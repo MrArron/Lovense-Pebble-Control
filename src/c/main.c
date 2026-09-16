@@ -862,7 +862,14 @@ static void update_time_display(struct tm *tick_time) {
     // returns 0 for them) - that was the real-hardware bug. sum_today() is
     // the correct call for "today's step count so far".
     HealthValue steps = health_service_sum_today(HealthMetricStepCount);
-    snprintf(date_buf, sizeof(date_buf), "%d", (int)steps);
+    // TEMPORARY re-test: re-add the literal Noto emoji (U+1F6B6) ahead of a
+    // now-correct, non-zero step count, to rule out the previous hardware
+    // test's "0" (a symptom of the health API bug, fixed above) being why
+    // nothing rendered, rather than the emoji itself being unsupported.
+    // The vector icon layer is left un-built below (build_secondary_icon
+    // call removed for this test) so there's no double icon. Revert to
+    // the vector glyph if this still doesn't render on real hardware.
+    snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
   } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
     strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
   } else {
@@ -871,25 +878,7 @@ static void update_time_display(struct tm *tick_time) {
   strncpy(s_date_text, date_buf, sizeof(s_date_text) - 1);
   s_date_text[sizeof(s_date_text) - 1] = '\0';
   if (s_date_layer && !s_toy_display_timer) { // don't clobber an active toy-name reveal
-    // Frame-shifting only ever applies on Digital (s_date_frame_full is only
-    // set in build_chrono_face) - Analog's date_layer frame is static and
-    // must never be touched here, or it picks up stale/zeroed data.
-    if (s_discrete_face == DISCRETE_FACE_CHRONO) {
-      if (show_steps) {
-        int16_t icon_w = s_date_frame_full.size.h;
-        GRect steps_frame = GRect((int16_t)(s_date_frame_full.origin.x + icon_w),
-                                   s_date_frame_full.origin.y,
-                                   (int16_t)(s_date_frame_full.size.w - icon_w),
-                                   s_date_frame_full.size.h);
-        layer_set_frame(text_layer_get_layer(s_date_layer), steps_frame);
-      } else {
-        layer_set_frame(text_layer_get_layer(s_date_layer), s_date_frame_full);
-      }
-    }
     text_layer_set_text(s_date_layer, s_date_text);
-  }
-  if (s_secondary_icon_layer) {
-    layer_mark_dirty(s_secondary_icon_layer);
   }
 
   if (s_discrete_face == DISCRETE_FACE_CHRONO && s_time_layer) {
@@ -1250,8 +1239,8 @@ static void build_chrono_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
-  build_secondary_icon(date_frame);
-  s_date_frame_full = date_frame;
+  // build_secondary_icon(date_frame) temporarily not called - see the
+  // emoji re-test comment in update_time_display.
 
   s_subdial_layer = layer_create(subdial_frame);
   layer_set_update_proc(s_subdial_layer, chrono_subdial_update_proc);
