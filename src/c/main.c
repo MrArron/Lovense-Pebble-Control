@@ -117,10 +117,8 @@ static Layer *s_subdial_layer;    // 1d only - ring + ticks + needle + cap
 static Layer *s_register_layer;   // 1d/rect only - Steady/Pulse/Wave totalizer
 static TextLayer *s_time_layer;   // 1d only - digital "HH:MM"
 static TextLayer *s_date_layer;   // both faces - also doubles as the toy-name reveal target
-static Layer *s_secondary_icon_layer; // both faces - walking-person glyph, steps mode only
 static char s_date_text[24] = ""; // last real date string, restored after a toy-name reveal
 static AppTimer *s_toy_display_timer = NULL;
-static GRect s_date_frame_full; // date_layer's original full-width frame, before any steps-mode shift
 static int s_current_wday = 0; // 0=Sunday, read by the day-row draw callback
 
 static int s_intensity = 0;
@@ -312,11 +310,15 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
   int16_t radius = (bounds.size.w / 2) - 6;
   graphics_fill_circle(ctx, center, radius);
 #else
-  // Flush to the true screen edge (small radius) rather than a large outer
-  // rounding, which left the background color visible in the real corners
-  // on rectangular hardware. Border thickness matches the 8px device inset
-  // the design spec calls for on both new faces.
-  graphics_fill_rect(ctx, bounds, 4, GCornersAll);
+  // Perfectly square outer fill, flush to the true screen edge with zero
+  // corner radius - any positive radius here leaves a small gap at the
+  // real corners showing the window background through, since a rounded
+  // rect's corner-cut area falls entirely outside bounds' true corner
+  // pixels. The physical screen's own rounded bezel/glass already softens
+  // square corners on real hardware; no software-side rounding is needed
+  // for the outer fill. Border thickness matches the 8px device inset the
+  // design spec calls for on both new faces.
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   GRect inner = GRect(bounds.origin.x + 8, bounds.origin.y + 8,
                        bounds.size.w - 16, bounds.size.h - 16);
   graphics_context_set_fill_color(ctx, s_discrete_bg_color);
@@ -357,9 +359,9 @@ static void status_row_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_text_color(ctx, s_discrete_muted_color);
   graphics_draw_text(ctx, "BT", font, bt_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  // Dot sits tight against "BT", scaled to the label's cap height (1.6x the
-  // original 3px-radius/34px-offset geometry).
-  GPoint dot_center = GPoint(18, bounds.size.h / 2);
+  // Dot offset from "BT" with a bit of breathing room (was flush against
+  // the label at x=18, looked unpolished).
+  GPoint dot_center = GPoint(26, bounds.size.h / 2);
   if (s_bt_state == BT_STATE_CONNECTING) {
     if (s_bt_blink_on) {
       graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
@@ -540,42 +542,6 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, color);
     graphics_fill_rect(ctx, underline, 0, GCornerNone);
   }
-}
-
-// Minimalist walking-person pictogram - vector-drawn like the app's other
-// glyphs (BT icon, button chevrons, pattern-register triangles), not a
-// bitmap resource or emoji: Pebble's public system fonts have no emoji
-// glyphs available to third-party apps.
-static void secondary_icon_update_proc(Layer *layer, GContext *ctx) {
-  // Digital-only (this layer is never built for Analog - see build_analog_face).
-  if (s_secondary_display != SECONDARY_DISPLAY_STEPS || s_discrete_face != DISCRETE_FACE_CHRONO) {
-    return; // date mode - icon column stays blank
-  }
-  GRect bounds = layer_get_bounds(layer);
-  int16_t cx = (int16_t)(bounds.size.w / 2);
-
-  graphics_context_set_fill_color(ctx, s_discrete_muted_color);
-  graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
-  graphics_context_set_stroke_width(ctx, 2);
-
-  graphics_fill_circle(ctx, GPoint(cx, 3), 2); // head
-  graphics_draw_line(ctx, GPoint(cx, 6), GPoint(cx, 11)); // torso
-  graphics_draw_line(ctx, GPoint(cx, 8), GPoint((int16_t)(cx + 3), 6)); // arm, swung forward
-  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx - 4), (int16_t)(bounds.size.h - 1))); // back leg
-  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx + 3), (int16_t)(bounds.size.h - 4))); // front leg, mid-stride
-}
-
-// Shared by both discrete faces: a small square icon column at the left
-// edge of the date row, matching the row's own height. Only visible in
-// steps mode (secondary_icon_update_proc no-ops otherwise); date mode's
-// centered text is completely unaffected since it still spans the row's
-// full original width.
-static void build_secondary_icon(GRect date_frame) {
-  GRect icon_frame = GRect(date_frame.origin.x, date_frame.origin.y,
-                            date_frame.size.h, date_frame.size.h);
-  s_secondary_icon_layer = layer_create(icon_frame);
-  layer_set_update_proc(s_secondary_icon_layer, secondary_icon_update_proc);
-  layer_add_child(s_discrete_container, s_secondary_icon_layer);
 }
 
 static void bt_blink_handler(void *data) {
@@ -838,7 +804,13 @@ static void update_time_display(struct tm *tick_time) {
   static char date_buf[24];
   if (show_steps) {
     HealthValue steps = health_service_peek_current_value(HealthMetricStepCount);
-    snprintf(date_buf, sizeof(date_buf), "%d", (int)steps);
+    // Hardware test: real "walking person" Noto emoji (U+1F6B6), not a
+    // vector glyph - Pebble's public FONT_KEY_* system fonts don't include
+    // emoji, but it's untested whether graphics_draw_text falls back to an
+    // internal emoji-capable font (as notification rendering does) for an
+    // unmapped codepoint. If it renders as a blank/box on real hardware,
+    // that confirms emoji aren't available to third-party apps this way.
+    snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
   } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
     strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
   } else {
@@ -847,21 +819,7 @@ static void update_time_display(struct tm *tick_time) {
   strncpy(s_date_text, date_buf, sizeof(s_date_text) - 1);
   s_date_text[sizeof(s_date_text) - 1] = '\0';
   if (s_date_layer && !s_toy_display_timer) { // don't clobber an active toy-name reveal
-    if (show_steps) {
-      int16_t icon_w = s_date_frame_full.size.h;
-      GRect steps_frame = GRect((int16_t)(s_date_frame_full.origin.x + icon_w),
-                                 s_date_frame_full.origin.y,
-                                 (int16_t)(s_date_frame_full.size.w - icon_w),
-                                 s_date_frame_full.size.h);
-      layer_set_frame(text_layer_get_layer(s_date_layer), steps_frame);
-    } else {
-      layer_set_frame(text_layer_get_layer(s_date_layer), s_date_frame_full);
-    }
-    text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
     text_layer_set_text(s_date_layer, s_date_text);
-  }
-  if (s_secondary_icon_layer) {
-    layer_mark_dirty(s_secondary_icon_layer);
   }
 
   if (s_discrete_face == DISCRETE_FACE_CHRONO && s_time_layer) {
@@ -1172,10 +1130,8 @@ static void build_analog_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
-  s_date_frame_full = date_frame; // update_time_display resets the frame to this every tick
-  // Steps mode is Digital-only (main.c: update_time_display) - the walking
-  // icon looked bad crowded next to the analog clock face, so Analog never
-  // builds the icon layer and always shows the date regardless of setting.
+  // Steps mode is Digital-only (see update_time_display) - Analog always
+  // shows the date regardless of the secondary_display setting.
 
   s_status_row_layer = layer_create(status_frame);
   layer_set_update_proc(s_status_row_layer, status_row_update_proc);
@@ -1224,8 +1180,6 @@ static void build_chrono_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
-  build_secondary_icon(date_frame);
-  s_date_frame_full = date_frame;
 
   s_subdial_layer = layer_create(subdial_frame);
   layer_set_update_proc(s_subdial_layer, chrono_subdial_update_proc);
@@ -1282,10 +1236,6 @@ static void teardown_discrete_ui(void) {
   if (s_date_layer) {
     text_layer_destroy(s_date_layer);
     s_date_layer = NULL;
-  }
-  if (s_secondary_icon_layer) {
-    layer_destroy(s_secondary_icon_layer);
-    s_secondary_icon_layer = NULL;
   }
   if (s_hands_layer) {
     layer_destroy(s_hands_layer);

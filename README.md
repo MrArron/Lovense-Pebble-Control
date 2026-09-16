@@ -221,16 +221,21 @@ All commands target whichever toy (or "All Toys") is currently selected.
   disguise's "look ordinary at rest" job is already done; the sub-dial
   needle just always shows level, full stop.
 
-  Both faces' date row can be switched to show today's step count instead
-  (a settings-page toggle, `secondary_display`, default "Date") — but this
+  The date row can be switched to show today's step count instead (a
+  settings-page toggle, `secondary_display`, default "Date") — but this
   only takes effect on **Digital**; Analog always shows the date regardless
-  of the setting, since a small walking-person icon crowded next to the
-  analog clock face didn't read well visually. Steps are read via
+  of the setting, since a walking-person glyph crowded next to the analog
+  clock face didn't read well visually. Steps are read via
   `health_service_peek_current_value(HealthMetricStepCount)` (accelerometer-
-  derived, works on every target platform, no dedicated pedometer needed);
-  the walking-person icon to its left is vector-drawn (`GPath`/circle/line
-  primitives), not a bitmap or emoji — Pebble's public system fonts have no
-  emoji glyphs available to third-party apps.
+  derived, works on every target platform, no dedicated pedometer needed).
+  The walking-person glyph to its left is a literal Noto emoji character
+  (U+1F6B6) embedded directly in the string, currently an unofficial
+  hardware test rather than a confirmed-supported technique — Pebble's
+  public `FONT_KEY_*` system fonts don't include emoji, but it's untested
+  whether `graphics_draw_text()` falls back to an internal emoji-capable
+  font (as notification rendering does) for an unmapped codepoint. It
+  renders as a real walking pictogram in the emulator, which is a good
+  sign but not proof for real hardware.
 
   A "BT" label + a small status dot (muted when connected, red when lost)
   plus a battery percentage sit in a status row on both faces; the label
