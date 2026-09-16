@@ -117,8 +117,10 @@ static Layer *s_subdial_layer;    // 1d only - ring + ticks + needle + cap
 static Layer *s_register_layer;   // 1d/rect only - Steady/Pulse/Wave totalizer
 static TextLayer *s_time_layer;   // 1d only - digital "HH:MM"
 static TextLayer *s_date_layer;   // both faces - also doubles as the toy-name reveal target
+static Layer *s_secondary_icon_layer; // Digital only - walking-person glyph, steps mode only
 static char s_date_text[24] = ""; // last real date string, restored after a toy-name reveal
 static AppTimer *s_toy_display_timer = NULL;
+static GRect s_date_frame_full; // Digital's date_layer full-width frame, before any steps-mode shift
 static int s_current_wday = 0; // 0=Sunday, read by the day-row draw callback
 
 static int s_intensity = 0;
@@ -202,6 +204,18 @@ static GColor color_from_packed(int packed) {
 }
 
 static GColor blend_colors(GColor a, GColor b) {
+#if !defined(PBL_COLOR)
+  // On 1-bit displays an RGB blend just quantizes to whichever of black/
+  // white is nearest, with no dithering - and the common default (white
+  // bg + black text) produces a ~66%-bright gray that rounds to white,
+  // making the "muted" element vanish entirely against a white
+  // background. Confirmed on real aplite/diorite hardware: the BT status
+  // row and 6 of 7 day-of-week letters were invisible. GColorDarkGray is
+  // a named palette entry that always renders as a checkerboard dither on
+  // 1-bit displays instead of quantizing to a solid color, guaranteeing
+  // visibility regardless of which colors were actually being blended.
+  return GColorDarkGray;
+#else
   // A plain 50/50 blend, done on GColor8's 2-bit-per-channel values (each
   // channel is 0-3, representing 0/85/170/255). Used to derive "secondary"
   // colors (a muted date/day-row tone, a readable pattern-label tint) from
@@ -219,6 +233,7 @@ static GColor blend_colors(GColor a, GColor b) {
   int g = ((ag + bg + 1) / 2) * 85;
   int b_val = ((ab + bb + 1) / 2) * 85;
   return GColorFromRGB(r, g, b_val);
+#endif
 }
 
 static void recompute_discrete_muted(void) {
@@ -544,6 +559,45 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
+// Minimalist walking-person pictogram - vector-drawn like the app's other
+// glyphs (BT icon, button chevrons, pattern-register triangles). Reverted
+// from a literal Noto emoji character after real-hardware testing (Pebble
+// Time 2) confirmed it doesn't render at all in production firmware -
+// only the emulator's bundled fonts showed it, which turned out to be
+// misleading. Pebble's public system fonts have no emoji glyphs available
+// to third-party apps.
+static void secondary_icon_update_proc(Layer *layer, GContext *ctx) {
+  // Digital-only (this layer is never built for Analog - see build_analog_face).
+  if (s_secondary_display != SECONDARY_DISPLAY_STEPS || s_discrete_face != DISCRETE_FACE_CHRONO) {
+    return; // date mode - icon column stays blank
+  }
+  GRect bounds = layer_get_bounds(layer);
+  int16_t cx = (int16_t)(bounds.size.w / 2);
+
+  graphics_context_set_fill_color(ctx, s_discrete_muted_color);
+  graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
+  graphics_context_set_stroke_width(ctx, 2);
+
+  graphics_fill_circle(ctx, GPoint(cx, 3), 2); // head
+  graphics_draw_line(ctx, GPoint(cx, 6), GPoint(cx, 11)); // torso
+  graphics_draw_line(ctx, GPoint(cx, 8), GPoint((int16_t)(cx + 3), 6)); // arm, swung forward
+  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx - 4), (int16_t)(bounds.size.h - 1))); // back leg
+  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx + 3), (int16_t)(bounds.size.h - 4))); // front leg, mid-stride
+}
+
+// Shared by both discrete faces: a small square icon column at the left
+// edge of the date row, matching the row's own height. Only visible in
+// steps mode (secondary_icon_update_proc no-ops otherwise); date mode's
+// centered text is completely unaffected since it still spans the row's
+// full original width.
+static void build_secondary_icon(GRect date_frame) {
+  GRect icon_frame = GRect(date_frame.origin.x, date_frame.origin.y,
+                            date_frame.size.h, date_frame.size.h);
+  s_secondary_icon_layer = layer_create(icon_frame);
+  layer_set_update_proc(s_secondary_icon_layer, secondary_icon_update_proc);
+  layer_add_child(s_discrete_container, s_secondary_icon_layer);
+}
+
 static void bt_blink_handler(void *data) {
   s_bt_blink_on = !s_bt_blink_on;
   if (s_status_row_layer) {
@@ -803,14 +857,12 @@ static void update_time_display(struct tm *tick_time) {
 
   static char date_buf[24];
   if (show_steps) {
-    HealthValue steps = health_service_peek_current_value(HealthMetricStepCount);
-    // Hardware test: real "walking person" Noto emoji (U+1F6B6), not a
-    // vector glyph - Pebble's public FONT_KEY_* system fonts don't include
-    // emoji, but it's untested whether graphics_draw_text falls back to an
-    // internal emoji-capable font (as notification rendering does) for an
-    // unmapped codepoint. If it renders as a blank/box on real hardware,
-    // that confirms emoji aren't available to third-party apps this way.
-    snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
+    // health_service_peek_current_value() is explicitly documented as NOT
+    // applicable to accumulator metrics like HealthMetricStepCount (always
+    // returns 0 for them) - that was the real-hardware bug. sum_today() is
+    // the correct call for "today's step count so far".
+    HealthValue steps = health_service_sum_today(HealthMetricStepCount);
+    snprintf(date_buf, sizeof(date_buf), "%d", (int)steps);
   } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
     strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
   } else {
@@ -819,7 +871,25 @@ static void update_time_display(struct tm *tick_time) {
   strncpy(s_date_text, date_buf, sizeof(s_date_text) - 1);
   s_date_text[sizeof(s_date_text) - 1] = '\0';
   if (s_date_layer && !s_toy_display_timer) { // don't clobber an active toy-name reveal
+    // Frame-shifting only ever applies on Digital (s_date_frame_full is only
+    // set in build_chrono_face) - Analog's date_layer frame is static and
+    // must never be touched here, or it picks up stale/zeroed data.
+    if (s_discrete_face == DISCRETE_FACE_CHRONO) {
+      if (show_steps) {
+        int16_t icon_w = s_date_frame_full.size.h;
+        GRect steps_frame = GRect((int16_t)(s_date_frame_full.origin.x + icon_w),
+                                   s_date_frame_full.origin.y,
+                                   (int16_t)(s_date_frame_full.size.w - icon_w),
+                                   s_date_frame_full.size.h);
+        layer_set_frame(text_layer_get_layer(s_date_layer), steps_frame);
+      } else {
+        layer_set_frame(text_layer_get_layer(s_date_layer), s_date_frame_full);
+      }
+    }
     text_layer_set_text(s_date_layer, s_date_text);
+  }
+  if (s_secondary_icon_layer) {
+    layer_mark_dirty(s_secondary_icon_layer);
   }
 
   if (s_discrete_face == DISCRETE_FACE_CHRONO && s_time_layer) {
@@ -1180,6 +1250,8 @@ static void build_chrono_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
+  build_secondary_icon(date_frame);
+  s_date_frame_full = date_frame;
 
   s_subdial_layer = layer_create(subdial_frame);
   layer_set_update_proc(s_subdial_layer, chrono_subdial_update_proc);
@@ -1236,6 +1308,10 @@ static void teardown_discrete_ui(void) {
   if (s_date_layer) {
     text_layer_destroy(s_date_layer);
     s_date_layer = NULL;
+  }
+  if (s_secondary_icon_layer) {
+    layer_destroy(s_secondary_icon_layer);
+    s_secondary_icon_layer = NULL;
   }
   if (s_hands_layer) {
     layer_destroy(s_hands_layer);

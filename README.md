@@ -226,16 +226,17 @@ All commands target whichever toy (or "All Toys") is currently selected.
   only takes effect on **Digital**; Analog always shows the date regardless
   of the setting, since a walking-person glyph crowded next to the analog
   clock face didn't read well visually. Steps are read via
-  `health_service_peek_current_value(HealthMetricStepCount)` (accelerometer-
-  derived, works on every target platform, no dedicated pedometer needed).
-  The walking-person glyph to its left is a literal Noto emoji character
-  (U+1F6B6) embedded directly in the string, currently an unofficial
-  hardware test rather than a confirmed-supported technique — Pebble's
-  public `FONT_KEY_*` system fonts don't include emoji, but it's untested
-  whether `graphics_draw_text()` falls back to an internal emoji-capable
-  font (as notification rendering does) for an unmapped codepoint. It
-  renders as a real walking pictogram in the emulator, which is a good
-  sign but not proof for real hardware.
+  `health_service_sum_today(HealthMetricStepCount)` (accelerometer-derived,
+  works on every target platform, no dedicated pedometer needed) — not
+  `health_service_peek_current_value()`, which the SDK docs explicitly
+  call out as inapplicable to accumulator metrics like step count (always
+  returns 0 for them); using the wrong one was a real bug caught via
+  real-hardware testing. The walking-person glyph to its left is
+  vector-drawn (`GPath`/circle/line primitives), not a bitmap or emoji —
+  confirmed on real Pebble Time 2 hardware that a literal Noto emoji
+  character doesn't render at all in production firmware (it looked
+  promising in the emulator, which turned out to be misleading — Pebble's
+  public system fonts have no emoji glyphs available to third-party apps).
 
   A "BT" label + a small status dot (muted when connected, red when lost)
   plus a battery percentage sit in a status row on both faces; the label
