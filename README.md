@@ -231,12 +231,13 @@ All commands target whichever toy (or "All Toys") is currently selected.
   `health_service_peek_current_value()`, which the SDK docs explicitly
   call out as inapplicable to accumulator metrics like step count (always
   returns 0 for them); using the wrong one was a real bug caught via
-  real-hardware testing. The walking-person glyph to its left is
-  vector-drawn (`GPath`/circle/line primitives), not a bitmap or emoji —
-  confirmed on real Pebble Time 2 hardware that a literal Noto emoji
-  character doesn't render at all in production firmware (it looked
-  promising in the emulator, which turned out to be misleading — Pebble's
-  public system fonts have no emoji glyphs available to third-party apps).
+  real-hardware testing. The walking-person glyph to its left is a literal
+  Noto emoji character (U+1F6B6) embedded directly in the string —
+  confirmed rendering correctly on real Pebble Time 2 hardware, even
+  though it isn't an officially-documented third-party capability
+  (Pebble's public `FONT_KEY_*` system fonts don't list emoji, but the
+  text renderer evidently falls back to an emoji-capable font for
+  unmapped codepoints, the same way notification text does).
 
   A "BT" label + a small status dot (muted when connected, red when lost)
   plus a battery percentage sit in a status row on both faces; the label

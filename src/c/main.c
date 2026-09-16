@@ -117,10 +117,8 @@ static Layer *s_subdial_layer;    // 1d only - ring + ticks + needle + cap
 static Layer *s_register_layer;   // 1d/rect only - Steady/Pulse/Wave totalizer
 static TextLayer *s_time_layer;   // 1d only - digital "HH:MM"
 static TextLayer *s_date_layer;   // both faces - also doubles as the toy-name reveal target
-static Layer *s_secondary_icon_layer; // Digital only - walking-person glyph, steps mode only
 static char s_date_text[24] = ""; // last real date string, restored after a toy-name reveal
 static AppTimer *s_toy_display_timer = NULL;
-static GRect s_date_frame_full; // Digital's date_layer full-width frame, before any steps-mode shift
 static int s_current_wday = 0; // 0=Sunday, read by the day-row draw callback
 
 static int s_intensity = 0;
@@ -388,15 +386,10 @@ static void status_row_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_circle(ctx, dot_center, 5);
   }
 
-  static char battery_buf[16];
+  static char battery_buf[8];
   BatteryChargeState battery = battery_state_service_peek();
-  // TEMPORARY emoji re-test #2: simplest possible surface - battery % is
-  // always present, never zero/permission-gated, so this isolates the
-  // "does this codepoint render on real hardware at all" question
-  // completely from the HealthService permission/accessibility mess.
-  // Revert to a plain "%d%%" if this doesn't render either.
-  snprintf(battery_buf, sizeof(battery_buf), "\xF0\x9F\x9A\xB6 %d%%", battery.charge_percent);
-  GRect batt_rect = GRect(bounds.size.w - 70, 0, 70, bounds.size.h);
+  snprintf(battery_buf, sizeof(battery_buf), "%d%%", battery.charge_percent);
+  GRect batt_rect = GRect(bounds.size.w - 50, 0, 50, bounds.size.h);
   graphics_context_set_text_color(ctx, s_discrete_muted_color);
   graphics_draw_text(ctx, battery_buf, font, batt_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 }
@@ -562,45 +555,6 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, color);
     graphics_fill_rect(ctx, underline, 0, GCornerNone);
   }
-}
-
-// Minimalist walking-person pictogram - vector-drawn like the app's other
-// glyphs (BT icon, button chevrons, pattern-register triangles). Reverted
-// from a literal Noto emoji character after real-hardware testing (Pebble
-// Time 2) confirmed it doesn't render at all in production firmware -
-// only the emulator's bundled fonts showed it, which turned out to be
-// misleading. Pebble's public system fonts have no emoji glyphs available
-// to third-party apps.
-static void secondary_icon_update_proc(Layer *layer, GContext *ctx) {
-  // Digital-only (this layer is never built for Analog - see build_analog_face).
-  if (s_secondary_display != SECONDARY_DISPLAY_STEPS || s_discrete_face != DISCRETE_FACE_CHRONO) {
-    return; // date mode - icon column stays blank
-  }
-  GRect bounds = layer_get_bounds(layer);
-  int16_t cx = (int16_t)(bounds.size.w / 2);
-
-  graphics_context_set_fill_color(ctx, s_discrete_muted_color);
-  graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
-  graphics_context_set_stroke_width(ctx, 2);
-
-  graphics_fill_circle(ctx, GPoint(cx, 3), 2); // head
-  graphics_draw_line(ctx, GPoint(cx, 6), GPoint(cx, 11)); // torso
-  graphics_draw_line(ctx, GPoint(cx, 8), GPoint((int16_t)(cx + 3), 6)); // arm, swung forward
-  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx - 4), (int16_t)(bounds.size.h - 1))); // back leg
-  graphics_draw_line(ctx, GPoint(cx, 11), GPoint((int16_t)(cx + 3), (int16_t)(bounds.size.h - 4))); // front leg, mid-stride
-}
-
-// Shared by both discrete faces: a small square icon column at the left
-// edge of the date row, matching the row's own height. Only visible in
-// steps mode (secondary_icon_update_proc no-ops otherwise); date mode's
-// centered text is completely unaffected since it still spans the row's
-// full original width.
-static void build_secondary_icon(GRect date_frame) {
-  GRect icon_frame = GRect(date_frame.origin.x, date_frame.origin.y,
-                            date_frame.size.h, date_frame.size.h);
-  s_secondary_icon_layer = layer_create(icon_frame);
-  layer_set_update_proc(s_secondary_icon_layer, secondary_icon_update_proc);
-  layer_add_child(s_discrete_container, s_secondary_icon_layer);
 }
 
 static void bt_blink_handler(void *data) {
@@ -889,13 +843,12 @@ static void update_time_display(struct tm *tick_time) {
       // permission is granted and the metric is supported, but no steps
       // have been recorded yet today.
       HealthValue steps = health_service_sum_today(HealthMetricStepCount);
-      // TEMPORARY re-test: literal Noto emoji (U+1F6B6) ahead of the count,
-      // to rule out the previous test's "0" (a symptom of the health API
-      // bug, fixed here) being why nothing rendered, rather than the emoji
-      // itself being unsupported. The vector icon layer is left un-built
-      // below (build_secondary_icon call removed for this test) so
-      // there's no double icon. Revert to the vector glyph if this still
-      // doesn't render on real hardware.
+      // Walking-person Noto emoji (U+1F6B6) ahead of the count - confirmed
+      // rendering correctly on real Pebble Time 2 hardware, despite not
+      // being an officially-documented third-party capability (Pebble's
+      // public FONT_KEY_* system fonts don't list emoji, but the text
+      // renderer evidently falls back to an emoji-capable font for
+      // unmapped codepoints, the same way notification text does).
       snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
     }
   } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
@@ -1267,8 +1220,6 @@ static void build_chrono_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
-  // build_secondary_icon(date_frame) temporarily not called - see the
-  // emoji re-test comment in update_time_display.
 
   s_subdial_layer = layer_create(subdial_frame);
   layer_set_update_proc(s_subdial_layer, chrono_subdial_update_proc);
@@ -1325,10 +1276,6 @@ static void teardown_discrete_ui(void) {
   if (s_date_layer) {
     text_layer_destroy(s_date_layer);
     s_date_layer = NULL;
-  }
-  if (s_secondary_icon_layer) {
-    layer_destroy(s_secondary_icon_layer);
-    s_secondary_icon_layer = NULL;
   }
   if (s_hands_layer) {
     layer_destroy(s_hands_layer);
