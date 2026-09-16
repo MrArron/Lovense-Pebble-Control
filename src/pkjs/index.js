@@ -533,6 +533,14 @@ function sendDiscreteFaceToWatch(face) {
   });
 }
 
+function sendSecondaryDisplayToWatch(mode) {
+  queueAppMessage({ secondary_display: mode === 'steps' ? 1 : 0 }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send secondary display mode to watch.');
+  });
+}
+
 function sendBatterySourceToWatch(source) {
   queueAppMessage({ battery_source: source === 'toy' ? 1 : 0 }, function () {
     // delivered
@@ -583,6 +591,7 @@ Pebble.addEventListener('ready', function () {
   // never pushed down before (e.g. after reinstalling the watchapp).
   sendUiStyleToWatch(getSetting('lovenseUiStyle', 'basic'));
   sendDiscreteFaceToWatch(getSetting('discreteFace', 'analog'));
+  sendSecondaryDisplayToWatch(getSetting('secondaryDisplay', 'date'));
   sendBasicColorsToWatch();
   sendDiscreteColorsToWatch();
   sendDiscreteActiveColorToWatch();
@@ -645,6 +654,10 @@ Pebble.addEventListener('showConfiguration', function () {
   var batterySource = getSetting('batterySource', 'watch');
   var batteryWatchChecked = batterySource === 'watch' ? 'checked' : '';
   var batteryToyChecked = batterySource === 'toy' ? 'checked' : '';
+
+  var secondaryDisplay = getSetting('secondaryDisplay', 'date');
+  var secondaryDateChecked = secondaryDisplay === 'date' ? 'checked' : '';
+  var secondaryStepsChecked = secondaryDisplay === 'steps' ? 'checked' : '';
 
   // Basic's fields are the single source of truth for the unified Custom-tab
   // swatches (see swatchRow() below) - Discrete's own basic_bg_color etc.
@@ -743,11 +756,11 @@ Pebble.addEventListener('showConfiguration', function () {
       '<label class="toy-check"><input type="checkbox" class="group-member" value="' + escapeHtml(t.id) + '"> in group</label></div>';
   }).join('') : '<p class="hint">No toys known yet - open Lovense Remote and connect one, or just save the IP/port above and come back.</p>';
 
-  var html = '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">' +
+  var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<style>' +
     '*{box-sizing:border-box}' +
     'html,body{height:100%;margin:0}' +
-    'body{--bg:#111;--fg:#eee;--card:#1c1c1e;--border:#292929;--muted:#999;--accent:#e0245e;' +
+    'body{--bg:#111;--fg:#eee;--card:#1c1c1e;--border:#292929;--muted:#999;--accent:#ff2d89;' +
     'font-family:sans-serif;background:var(--bg);color:var(--fg);display:flex;flex-direction:column}' +
     'body[data-theme="light"]{--bg:#f4f4f6;--fg:#111;--card:#ffffff;--border:#e3e3e6;--muted:#666}' +
     '.header{padding:16px 18px 12px;border-bottom:0.5px solid var(--border);flex-shrink:0;display:flex;justify-content:space-between;align-items:center}' +
@@ -758,7 +771,8 @@ Pebble.addEventListener('showConfiguration', function () {
     'label{display:block;margin-top:12px;font-size:14px}' +
     'input[type=text]{width:100%;padding:8px;margin-top:4px;font-size:16px;background:var(--card);border:0.5px solid var(--border);border-radius:8px;color:var(--fg)}' +
     '.radio-row{display:flex;align-items:center;margin-top:8px;font-size:15px}' +
-    '.radio-row input{width:auto;margin-right:10px}' +
+    '.radio-row input{width:auto;margin-right:10px;accent-color:var(--accent)}' +
+    'input[type=checkbox]{accent-color:var(--accent)}' +
     '.swatch-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}' +
     '.swatch{width:26px;height:26px;border-radius:50%;border:2px solid transparent;flex-shrink:0}' +
     '.swatch.selected{border-color:var(--fg);box-shadow:0 0 0 2px var(--bg)}' +
@@ -827,6 +841,13 @@ Pebble.addEventListener('showConfiguration', function () {
     '<label for="face-analog" style="display:inline;margin:0">Analog — ordinary analog watch, second hand encodes level</label></div>' +
     '<div class="radio-row"><input type="radio" name="discreteFace" id="face-chrono" value="chrono" ' + faceChronoChecked + '>' +
     '<label for="face-chrono" style="display:inline;margin:0">Digital — digital time with a chrono sub-dial</label></div>' +
+
+    '<label style="margin-top:20px">Secondary display</label>' +
+    '<p class="hint">Digital face only - Analog always shows the date.</p>' +
+    '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-date" value="date" ' + secondaryDateChecked + '>' +
+    '<label for="secondary-date" style="display:inline;margin:0">Date — day and date</label></div>' +
+    '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-steps" value="steps" ' + secondaryStepsChecked + '>' +
+    '<label for="secondary-steps" style="display:inline;margin:0">Steps — today\'s step count</label></div>' +
 
     '<div class="tabs">' +
     '<div class="tab active" id="tab-presets" onclick="showTab(\'presets\')">Presets</div>' +
@@ -1149,12 +1170,15 @@ Pebble.addEventListener('showConfiguration', function () {
     'discreteFace=discreteFace?discreteFace.value:"analog";' +
     'var batterySource=document.querySelector(\'input[name="batterySource"]:checked\');' +
     'batterySource=batterySource?batterySource.value:"watch";' +
+    'var secondaryDisplay=document.querySelector(\'input[name="secondaryDisplay"]:checked\');' +
+    'secondaryDisplay=secondaryDisplay?secondaryDisplay.value:"date";' +
     'var result={' +
     'lovenseHost:host,' +
     'lovensePort:port,' +
     'uiStyle:uiStyle,' +
     'discreteFace:discreteFace,' +
     'batterySource:batterySource,' +
+    'secondaryDisplay:secondaryDisplay,' +
     'basicColorBg:document.getElementById("basicColorBg").value,' +
     'basicColorText:document.getElementById("basicColorText").value,' +
     'basicColorAccent:document.getElementById("basicColorAccent").value,' +
@@ -1200,6 +1224,10 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.discreteFace !== undefined) {
       localStorage.setItem('discreteFace', settings.discreteFace);
       sendDiscreteFaceToWatch(settings.discreteFace);
+    }
+    if (settings.secondaryDisplay !== undefined) {
+      localStorage.setItem('secondaryDisplay', settings.secondaryDisplay);
+      sendSecondaryDisplayToWatch(settings.secondaryDisplay);
     }
     if (settings.batterySource !== undefined) {
       localStorage.setItem('batterySource', settings.batterySource);

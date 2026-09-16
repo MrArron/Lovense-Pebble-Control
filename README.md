@@ -16,6 +16,19 @@ Discrete faces (Analog/Digital) render and the idle-revert behavior works as
 designed. Real-device testing also surfaced three bugs, now fixed - see
 "Fixed this pass" below.
 
+**Local build/test toolchain**: this project now builds and runs locally via
+`pebble-tool` + the Pebble SDK (WSL/Ubuntu, since the SDK doesn't run on
+Windows directly) — `pebble build`, `pebble install --emulator <platform>`,
+and `pebble screenshot`/`emu-app-config` all work against this repo. Two
+build-breaking bugs this surfaced and fixed: the repo was missing the
+`wscript` build script pebble-tool requires, and `package.json`'s launcher
+icon was declared as two separate `menuIcon: true` resources, which the
+SDK's appinfo generator rejects outright (collapsed to one entry using the
+standard `~bw`/`~color` filename-tag convention). `enableMultiJS: true` was
+also added, which is required for the settings webview to run under
+`pebble-tool`'s local JS engine (`pypkjs`) at all. Targets now also include
+`flint` (Pebble 2 Duo) alongside the original five.
+
 **Discrete mode has two selectable faces** — see "Display styles" below:
 
 - **Analog** — an ordinary analog watch face; the second hand encodes
@@ -42,7 +55,7 @@ three-state (connecting/connected/disconnected) BT status glyph that blinks
 while connecting and updates immediately if the toy-events socket drops
 mid-session. The default color scheme (both display styles) is now the
 "Lovense pink" preset, and the watch has a launcher icon based on Lovense's
-logo (`resources/images/icon-color.png` / `icon-bw.png`).
+logo (`resources/images/icon~color.png` / `icon~bw.png`).
 
 **Fixed this pass** (found via real-hardware testing): `GetToys`'s `toys`
 field is a JSON-**encoded string**, not a plain object — `Object.keys()` on
@@ -92,10 +105,17 @@ to change for any of the deferred features above.
   `resources.media` for the launcher icon). The button bar is still drawn
   in code, not loaded from a PNG - the only bundled image resource is the
   launcher icon itself (see `resources/images/`).
-- `resources/images/icon-color.png` / `icon-bw.png` — the watch's launcher
+- `resources/images/icon~color.png` / `icon~bw.png` — the watch's launcher
   icon shown in Pebble OS's app list, based on Lovense's logo in the app's
   Lovense-pink brand color (color platforms) and a black/white variant
-  (Aplite/Diorite). Declared as `MENU_ICON` in `package.json`.
+  (Aplite/Diorite). Declared as a single `MENU_ICON` entry in
+  `package.json` (`file: "images/icon.png"`) — the `~bw`/`~color` filename
+  tags are Pebble's built-in per-platform resource-variant convention, which
+  the SDK resolves automatically per target platform. This is required: the
+  SDK's appinfo generator rejects a project with more than one
+  `menuIcon: true` resource entry, even when each entry is scoped to
+  different platforms via `targetPlatforms` — the only supported way to
+  have distinct bw/color icon art is one entry using this tag convention.
 - `STORE_LISTING.md` — copy for the Pebble/Rebble app store listing (not a
   build input - that store's submission happens through a separate web
   form, this is just where the text lives).
@@ -200,6 +220,24 @@ All commands target whichever toy (or "All Toys") is currently selected.
   its main clock already always shows real time continuously, so the
   disguise's "look ordinary at rest" job is already done; the sub-dial
   needle just always shows level, full stop.
+
+  The date row can be switched to show today's step count instead (a
+  settings-page toggle, `secondary_display`, default "Date") — but this
+  only takes effect on **Digital**; Analog always shows the date regardless
+  of the setting, since a walking-person glyph crowded next to the analog
+  clock face didn't read well visually. Steps are read via
+  `health_service_sum_today(HealthMetricStepCount)` (accelerometer-derived,
+  works on every target platform, no dedicated pedometer needed) — not
+  `health_service_peek_current_value()`, which the SDK docs explicitly
+  call out as inapplicable to accumulator metrics like step count (always
+  returns 0 for them); using the wrong one was a real bug caught via
+  real-hardware testing. The walking-person glyph to its left is a literal
+  Noto emoji character (U+1F6B6) embedded directly in the string —
+  confirmed rendering correctly on real Pebble Time 2 hardware, even
+  though it isn't an officially-documented third-party capability
+  (Pebble's public `FONT_KEY_*` system fonts don't list emoji, but the
+  text renderer evidently falls back to an emoji-capable font for
+  unmapped codepoints, the same way notification text does).
 
   A "BT" label + a small status dot (muted when connected, red when lost)
   plus a battery percentage sit in a status row on both faces; the label

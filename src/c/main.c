@@ -28,6 +28,9 @@
 #define BATTERY_SOURCE_WATCH 0
 #define BATTERY_SOURCE_TOY 1
 
+#define SECONDARY_DISPLAY_DATE 0
+#define SECONDARY_DISPLAY_STEPS 1
+
 #define BT_STATE_CONNECTING 0
 #define BT_STATE_CONNECTED 1
 #define BT_STATE_DISCONNECTED 2
@@ -43,8 +46,9 @@
 #define PERSIST_KEY_DISCRETE_ACTIVE 8
 #define PERSIST_KEY_DISCRETE_FACE 9
 #define PERSIST_KEY_BATTERY_SOURCE 10
+#define PERSIST_KEY_SECONDARY_DISPLAY 11
 
-#define TIP_DEFAULT_TEXT "Hold UP/DOWN\nto change pattern\nHold SELECT: toy"
+#define TIP_DEFAULT_TEXT "Hold UP/DOWN: pattern\nHold SELECT: toy"
 
 #define PATTERN_STEADY 0
 #define PATTERN_PULSE 1
@@ -127,6 +131,7 @@ static AppTimer *s_bt_blink_timer = NULL;
 static bool s_bt_blink_on = false;
 static char s_toy_name[24] = "All Toys";
 static int s_battery_source = BATTERY_SOURCE_WATCH;
+static int s_secondary_display = SECONDARY_DISPLAY_DATE;
 static int s_toy_battery = -1; // 0-100, or -1 = unknown (not persisted - meaningless until resent)
 
 // Idle behavior is Discrete-only now (the level hand/needle reverting to
@@ -197,6 +202,18 @@ static GColor color_from_packed(int packed) {
 }
 
 static GColor blend_colors(GColor a, GColor b) {
+#if !defined(PBL_COLOR)
+  // On 1-bit displays an RGB blend just quantizes to whichever of black/
+  // white is nearest, with no dithering - and the common default (white
+  // bg + black text) produces a ~66%-bright gray that rounds to white,
+  // making the "muted" element vanish entirely against a white
+  // background. Confirmed on real aplite/diorite hardware: the BT status
+  // row and 6 of 7 day-of-week letters were invisible. GColorDarkGray is
+  // a named palette entry that always renders as a checkerboard dither on
+  // 1-bit displays instead of quantizing to a solid color, guaranteeing
+  // visibility regardless of which colors were actually being blended.
+  return GColorDarkGray;
+#else
   // A plain 50/50 blend, done on GColor8's 2-bit-per-channel values (each
   // channel is 0-3, representing 0/85/170/255). Used to derive "secondary"
   // colors (a muted date/day-row tone, a readable pattern-label tint) from
@@ -214,6 +231,7 @@ static GColor blend_colors(GColor a, GColor b) {
   int g = ((ag + bg + 1) / 2) * 85;
   int b_val = ((ab + bb + 1) / 2) * 85;
   return GColorFromRGB(r, g, b_val);
+#endif
 }
 
 static void recompute_discrete_muted(void) {
@@ -305,11 +323,15 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
   int16_t radius = (bounds.size.w / 2) - 6;
   graphics_fill_circle(ctx, center, radius);
 #else
-  // Flush to the true screen edge (small radius) rather than a large outer
-  // rounding, which left the background color visible in the real corners
-  // on rectangular hardware. Border thickness matches the 8px device inset
-  // the design spec calls for on both new faces.
-  graphics_fill_rect(ctx, bounds, 4, GCornersAll);
+  // Perfectly square outer fill, flush to the true screen edge with zero
+  // corner radius - any positive radius here leaves a small gap at the
+  // real corners showing the window background through, since a rounded
+  // rect's corner-cut area falls entirely outside bounds' true corner
+  // pixels. The physical screen's own rounded bezel/glass already softens
+  // square corners on real hardware; no software-side rounding is needed
+  // for the outer fill. Border thickness matches the 8px device inset the
+  // design spec calls for on both new faces.
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   GRect inner = GRect(bounds.origin.x + 8, bounds.origin.y + 8,
                        bounds.size.w - 16, bounds.size.h - 16);
   graphics_context_set_fill_color(ctx, s_discrete_bg_color);
@@ -350,14 +372,17 @@ static void status_row_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_text_color(ctx, s_discrete_muted_color);
   graphics_draw_text(ctx, "BT", font, bt_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  // Dot sits tight against "BT", scaled to the label's cap height (1.6x the
-  // original 3px-radius/34px-offset geometry).
-  GPoint dot_center = GPoint(18, bounds.size.h / 2);
+  // Dot offset from "BT" with a bit of breathing room (was flush against
+  // the label at x=18, looked unpolished).
+  GPoint dot_center = GPoint(26, bounds.size.h / 2);
   if (s_bt_state == BT_STATE_CONNECTING) {
     if (s_bt_blink_on) {
       graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
       graphics_context_set_stroke_width(ctx, 2);
-      graphics_draw_circle(ctx, dot_center, 5);
+      // graphics_draw_arc() full-sweep instead of graphics_draw_circle() -
+      // see the sub-dial ring comment in chrono_subdial_update_proc for why.
+      GRect dot_rect = GRect((int16_t)(dot_center.x - 5), (int16_t)(dot_center.y - 5), 10, 10);
+      graphics_draw_arc(ctx, dot_rect, GOvalScaleModeFitCircle, 0, 2 * TRIG_MAX_ANGLE);
     }
   } else {
     graphics_context_set_fill_color(ctx, s_bt_state == BT_STATE_CONNECTED ? s_discrete_muted_color : GColorRed);
@@ -464,7 +489,16 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
 
   graphics_context_set_stroke_color(ctx, ring_color);
   graphics_context_set_stroke_width(ctx, ring_stroke);
-  graphics_draw_circle(ctx, center, ring_radius);
+  // graphics_draw_circle() uses an older midpoint-circle algorithm that can
+  // render flattened/straight-line artifacts on the left and right edges
+  // on real hardware at certain radii (confirmed on a real Pebble Time 2 -
+  // never showed up in the emulator, which apparently rasterizes circles
+  // more precisely). graphics_draw_arc() swept a full 360 degrees uses a
+  // different, more robust rendering path and is the modern recommended
+  // way to draw a full circle outline.
+  GRect ring_rect = GRect((int16_t)(center.x - ring_radius), (int16_t)(center.y - ring_radius),
+                           (int16_t)(ring_radius * 2), (int16_t)(ring_radius * 2));
+  graphics_draw_arc(ctx, ring_rect, GOvalScaleModeFitCircle, 0, 2 * TRIG_MAX_ANGLE);
 
   for (int q = 0; q < 4; q++) {
     draw_rotated_rect(ctx, center, angle_for_fraction(q, 4), tick_w,
@@ -786,8 +820,50 @@ static void update_time_display(struct tm *tick_time) {
     return;
   }
 
+  // Steps mode is Digital-only - a walking icon crowded next to the Analog
+  // clock face looked bad, so Analog always shows the date regardless of
+  // the secondary_display setting.
+  bool show_steps = (s_secondary_display == SECONDARY_DISPLAY_STEPS)
+                     && (s_discrete_face == DISCRETE_FACE_CHRONO);
+
   static char date_buf[24];
-  if (s_discrete_face == DISCRETE_FACE_ANALOG) {
+  if (show_steps) {
+    // Diagnostic: distinguish "genuinely zero steps" from "can't read
+    // steps at all" (no permission granted, unsupported, or no samples
+    // yet) instead of silently showing 0 for all of these - a real
+    // hardware test showed 0 even after fixing the sum_today() bug below,
+    // and this is the only way to tell which case it actually is.
+    time_t now = time(NULL);
+    struct tm *today_tm = localtime(&now);
+    struct tm start_tm = *today_tm;
+    start_tm.tm_hour = 0;
+    start_tm.tm_min = 0;
+    start_tm.tm_sec = 0;
+    time_t start_of_today = mktime(&start_tm);
+    HealthServiceAccessibilityMask access =
+        health_service_metric_accessible(HealthMetricStepCount, start_of_today, now);
+    if (access & HealthServiceAccessibilityMaskNoPermission) {
+      snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 no-perm");
+    } else if (access & HealthServiceAccessibilityMaskNotSupported) {
+      snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 n/a");
+    } else {
+      // health_service_peek_current_value() is explicitly documented as
+      // NOT applicable to accumulator metrics like HealthMetricStepCount
+      // (always returns 0 for them) - that was the original real-hardware
+      // bug. sum_today() is the correct call for "today's step count so
+      // far". A genuine 0 here (access has neither flag above set) means
+      // permission is granted and the metric is supported, but no steps
+      // have been recorded yet today.
+      HealthValue steps = health_service_sum_today(HealthMetricStepCount);
+      // Walking-person Noto emoji (U+1F6B6) ahead of the count - confirmed
+      // rendering correctly on real Pebble Time 2 hardware, despite not
+      // being an officially-documented third-party capability (Pebble's
+      // public FONT_KEY_* system fonts don't list emoji, but the text
+      // renderer evidently falls back to an emoji-capable font for
+      // unmapped codepoints, the same way notification text does).
+      snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
+    }
+  } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
     strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
   } else {
     strftime(date_buf, sizeof(date_buf), "%a %d %b", tick_time);
@@ -1026,9 +1102,17 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
   layer_add_child(s_basic_container, text_layer_get_layer(s_pattern_layer));
 
 #if defined(PBL_ROUND)
-  s_tip_layer = text_layer_create(GRect(content_x + 4, content_h - 30, basic_width - 8, 28));
+  s_tip_layer = text_layer_create(GRect(content_x + 4, content_h - 30, basic_width - 8, 34));
 #else
-  s_tip_layer = text_layer_create(GRect(2, bounds.size.h - 50, basic_width - 4, 42));
+  // Anchored to s_pattern_layer's own bottom edge (content_h/2 + 42) rather
+  // than an independently-tuned bounds.size.h offset, so the two stay
+  // non-overlapping on any screen height instead of two constants that only
+  // happened to work on Emery - aplite/basalt/diorite (168px tall) were
+  // already overlapping pattern_layer by 8px before this change.
+  int pattern_bottom = content_h / 2 + 42;
+  int tip_top = pattern_bottom + 4;
+  int tip_bottom = bounds.size.h - 8; // keep clear of the physical bezel
+  s_tip_layer = text_layer_create(GRect(2, tip_top, basic_width - 4, tip_bottom - tip_top));
 #endif
   text_layer_set_background_color(s_tip_layer, GColorClear);
   text_layer_set_font(s_tip_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
@@ -1098,6 +1182,8 @@ static void build_analog_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
+  // Steps mode is Digital-only (see update_time_display) - Analog always
+  // shows the date regardless of the secondary_display setting.
 
   s_status_row_layer = layer_create(status_frame);
   layer_set_update_proc(s_status_row_layer, status_row_update_proc);
@@ -1316,6 +1402,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     update_basic_toy_row();
   }
 
+  Tuple *secondary_display_tuple = dict_find(iterator, MESSAGE_KEY_secondary_display);
+  if (secondary_display_tuple) {
+    s_secondary_display = (int)secondary_display_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_SECONDARY_DISPLAY, s_secondary_display);
+    refresh_discrete_time();
+  }
+
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
   if (bg_tuple) {
     s_basic_bg_color = parse_hex_color(bg_tuple->value->cstring);
@@ -1427,6 +1520,9 @@ static void init(void) {
   s_battery_source = persist_exists(PERSIST_KEY_BATTERY_SOURCE)
     ? persist_read_int(PERSIST_KEY_BATTERY_SOURCE)
     : BATTERY_SOURCE_WATCH;
+  s_secondary_display = persist_exists(PERSIST_KEY_SECONDARY_DISPLAY)
+    ? persist_read_int(PERSIST_KEY_SECONDARY_DISPLAY)
+    : SECONDARY_DISPLAY_DATE;
 
   recompute_basic_pattern_color();
   recompute_discrete_muted();
