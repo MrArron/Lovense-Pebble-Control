@@ -30,6 +30,13 @@
 
 #define SECONDARY_DISPLAY_DATE 0
 #define SECONDARY_DISPLAY_STEPS 1
+#define SECONDARY_DISPLAY_HR 2
+
+// Emery/Gabbro only - how a tap/knock toggles play/pause (see TOUCH_MODE_*
+// state and apply_touch_mode()).
+#define TOUCH_MODE_ACCEL 0
+#define TOUCH_MODE_TOUCHSCREEN 1
+#define TOUCH_MODE_OFF 2
 
 #define BT_STATE_CONNECTING 0
 #define BT_STATE_CONNECTED 1
@@ -47,6 +54,7 @@
 #define PERSIST_KEY_DISCRETE_FACE 9
 #define PERSIST_KEY_BATTERY_SOURCE 10
 #define PERSIST_KEY_SECONDARY_DISPLAY 11
+#define PERSIST_KEY_TOUCH_MODE 12
 
 #define TIP_DEFAULT_TEXT "Hold UP/DOWN: pattern\nHold SELECT: toy"
 
@@ -71,9 +79,6 @@
 #define REF_W 200
 #define REF_H 228
 
-static const char *PATTERN_NAMES[PATTERN_COUNT] = { "STEADY", "PULSE", "WAVE" };
-static const char *PATTERN_ROMAN[PATTERN_COUNT] = { "I", "II", "III" };
-
 // Haptic confirmation when cycling patterns: buzz count matches position in
 // the list above (1 buzz = Steady, 2 = Pulse, 3 = Wave). Works identically
 // in both UI styles and needs nothing on screen, so it's the one piece of
@@ -95,7 +100,7 @@ static Window *s_window;
 static Layer *s_basic_container;
 static TextLayer *s_intensity_layer;
 static TextLayer *s_status_layer;
-static TextLayer *s_pattern_layer;
+static Layer *s_pattern_layer; // vector glyph (Steady/Pulse/Wave), not text
 static TextLayer *s_tip_layer;
 static TextLayer *s_basic_toy_layer; // persistent "<toy name> - <battery>%" row
 static Layer *s_button_bar_layer; // vector-drawn chevrons/pause-play - no bitmaps, no ActionBarLayer
@@ -133,6 +138,25 @@ static char s_toy_name[24] = "All Toys";
 static int s_battery_source = BATTERY_SOURCE_WATCH;
 static int s_secondary_display = SECONDARY_DISPLAY_DATE;
 static int s_toy_battery = -1; // 0-100, or -1 = unknown (not persisted - meaningless until resent)
+static int s_touch_mode = TOUCH_MODE_ACCEL; // Emery/Gabbro only - see TOUCH_MODE_*
+
+// Accelerometer mode: two knocks within ACCEL_DOUBLE_TAP_WINDOW_MS toggle
+// play/pause. A single knock just arms the window - shaking the watch
+// doesn't reliably produce a matched pair, unlike a deliberate double-knock.
+static AppTimer *s_accel_tap_window_timer = NULL;
+#define ACCEL_DOUBLE_TAP_WINDOW_MS 400
+
+// Touchscreen mode: raw touch_service state for building tap/double-tap/
+// long-press gestures ourselves (the SDK's tap_recognizer only recognizes a
+// single tap, and there's no long-press recognizer at all).
+static GPoint s_touch_down_point;
+static bool s_touch_moved;
+static bool s_touch_long_press_fired;
+static AppTimer *s_touch_long_press_timer = NULL;
+static AppTimer *s_touch_tap_window_timer = NULL;
+#define TOUCH_LONG_PRESS_MS 600
+#define TOUCH_DOUBLE_TAP_WINDOW_MS 400
+#define TOUCH_MOVE_THRESHOLD_PX 15
 
 // Idle behavior is Discrete-only now (the level hand/needle reverting to
 // real seconds while idle) - Basic mode no longer reacts to s_idle at all,
@@ -157,6 +181,9 @@ static void update_discrete_display(void);
 static void update_basic_display(void);
 static void update_basic_toy_row(void);
 static void click_config_provider(void *context);
+static void select_pattern(int pattern);
+static void cycle_pattern(int direction);
+static void apply_touch_mode(void);
 
 static void log_heap(const char *label) {
   APP_LOG(APP_LOG_LEVEL_INFO, "[heap] %s: free=%d used=%d",
@@ -301,6 +328,61 @@ static void draw_rotated_rect(GContext *ctx, GPoint pivot, int32_t angle,
   gpath_destroy(path);
 }
 
+// Draws a small vector glyph encoding a Steady/Pulse/Wave pattern, centered
+// within `frame`: Steady is a flat horizontal line, Pulse a square wave,
+// Wave a sine-like curve approximated with short line segments sampling
+// sin_lookup() - no floating point, matching angle_for_fraction/
+// draw_rotated_rect's existing fixed-point trig idiom elsewhere in this
+// file. Takes `pattern` explicitly rather than reading the global
+// s_pattern, since the register redesign below needs to draw all three
+// glyphs side by side regardless of which one is currently selected; the
+// 6 o'clock tick and Basic-mode indicator just pass s_pattern. `stroke_width`
+// is also explicit rather than derived from `frame` - the register's own
+// design spec calls for 2px when a column is selected and 1px otherwise,
+// which has nothing to do with the glyph's size. Shared by all call sites
+// so "what Pulse looks like" has one definition.
+static void draw_pattern_glyph(GContext *ctx, GRect frame, GColor color, int pattern,
+                                uint8_t stroke_width) {
+  int16_t cx = (int16_t)(frame.origin.x + frame.size.w / 2);
+  int16_t cy = (int16_t)(frame.origin.y + frame.size.h / 2);
+  int16_t half_w = (int16_t)(frame.size.w / 2);
+  int16_t half_h = (int16_t)(frame.size.h / 2);
+
+  graphics_context_set_stroke_color(ctx, color);
+  graphics_context_set_stroke_width(ctx, stroke_width);
+
+  if (pattern == PATTERN_PULSE) {
+    // Square wave: low - up - high - down - low, three equal-width segments.
+    int16_t third = (int16_t)((2 * half_w) / 3);
+    GPoint p0 = { (int16_t)(cx - half_w), (int16_t)(cy + half_h) };
+    GPoint p1 = { (int16_t)(p0.x + third), (int16_t)(cy + half_h) };
+    GPoint p2 = { p1.x, (int16_t)(cy - half_h) };
+    GPoint p3 = { (int16_t)(p2.x + third), (int16_t)(cy - half_h) };
+    GPoint p4 = { p3.x, (int16_t)(cy + half_h) };
+    GPoint p5 = { (int16_t)(cx + half_w), (int16_t)(cy + half_h) };
+    graphics_draw_line(ctx, p0, p1);
+    graphics_draw_line(ctx, p1, p2);
+    graphics_draw_line(ctx, p2, p3);
+    graphics_draw_line(ctx, p3, p4);
+    graphics_draw_line(ctx, p4, p5);
+  } else if (pattern == PATTERN_WAVE) {
+    // One full sine cycle, sampled into 8 short segments via sin_lookup().
+    const int samples = 8;
+    GPoint prev = { (int16_t)(cx - half_w), cy };
+    for (int i = 1; i <= samples; i++) {
+      int32_t angle = (TRIG_MAX_ANGLE * i) / samples;
+      GPoint pt = {
+        .x = (int16_t)(cx - half_w + (2 * half_w * i) / samples),
+        .y = (int16_t)(cy - (sin_lookup(angle) * half_h) / TRIG_MAX_RATIO),
+      };
+      graphics_draw_line(ctx, prev, pt);
+      prev = pt;
+    }
+  } else { // PATTERN_STEADY
+    graphics_draw_line(ctx, GPoint((int16_t)(cx - half_w), cy), GPoint((int16_t)(cx + half_w), cy));
+  }
+}
+
 // --- Discrete UI drawing: shared elements ---
 
 static void frame_update_proc(Layer *layer, GContext *ctx) {
@@ -320,7 +402,13 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_fill_color(ctx, s_discrete_bg_color);
   GPoint center = grect_center_point(&bounds);
+#if defined(PBL_PLATFORM_GABBRO)
+  // 6px read as a hairline on gabbro's larger screen in the emulator - 8px
+  // keeps the bezel visually proportional to Chalk's.
+  int16_t radius = (bounds.size.w / 2) - 8;
+#else
   int16_t radius = (bounds.size.w / 2) - 6;
+#endif
   graphics_fill_circle(ctx, center, radius);
 #else
   // Perfectly square outer fill, flush to the true screen edge with zero
@@ -404,11 +492,18 @@ static void analog_hands_update_proc(Layer *layer, GContext *ctx) {
   GPoint center = grect_center_point(&bounds);
   int16_t tick_radius = bounds.size.w / 2; // the layer is sized to exactly 2*tick_radius
 
-#if defined(PBL_ROUND)
+#if defined(PBL_PLATFORM_GABBRO)
+  int16_t quarter_w = 5, quarter_len = 14;
+  int16_t hour_tick_w = 3, hour_tick_len = 8;
+  int16_t hour_hand_w = 8, hour_hand_len = 49;
+  int16_t minute_hand_w = 8, minute_hand_len = 69;
+  int16_t level_hand_w = 5, level_hand_len = 74;
+  int16_t cap_radius = 5;
+#elif defined(PBL_ROUND)
   int16_t quarter_w = 4, quarter_len = 10;
   int16_t hour_tick_w = 2, hour_tick_len = 6;
-  int16_t hour_hand_w = 6, hour_hand_len = 36;
-  int16_t minute_hand_w = 6, minute_hand_len = 51;
+  int16_t hour_hand_w = 7, hour_hand_len = 36;
+  int16_t minute_hand_w = 7, minute_hand_len = 51;
   int16_t level_hand_w = 4, level_hand_len = 55;
   int16_t cap_radius = 4;
 #else
@@ -422,7 +517,23 @@ static void analog_hands_update_proc(Layer *layer, GContext *ctx) {
 #endif
 
   // Quarter ticks (0/90/180/270deg) in text; the other 8 hour ticks in muted.
+  // q==2 (180deg) is straight down - 6 o'clock, per this function's own
+  // "0 = up, clockwise" angle convention (angle_for_fraction(2,4) = 180deg).
+  // That's the one quarter tick replaced with the pattern glyph below.
   for (int q = 0; q < 4; q++) {
+    if (q == 2) {
+      // Shifted up a few px from the tick's own radial position - centering
+      // exactly on it put the glyph's lowest stroke pixels right on the
+      // hands_layer's own clipping edge (bottom-cut on real hardware).
+      int16_t clip_margin = 3;
+      GPoint glyph_mid = { center.x, (int16_t)(center.y + tick_radius - quarter_len / 2 - clip_margin) };
+      int16_t glyph_w = (int16_t)(quarter_len * 2);
+      int16_t glyph_h = quarter_len;
+      GRect glyph_frame = GRect((int16_t)(glyph_mid.x - glyph_w / 2), (int16_t)(glyph_mid.y - glyph_h / 2),
+                                 glyph_w, glyph_h);
+      draw_pattern_glyph(ctx, glyph_frame, s_discrete_text_color, s_pattern, 2);
+      continue;
+    }
     draw_rotated_rect(ctx, center, angle_for_fraction(q, 4), quarter_w,
                        tick_radius - quarter_len, quarter_len, s_discrete_text_color);
   }
@@ -441,6 +552,23 @@ static void analog_hands_update_proc(Layer *layer, GContext *ctx) {
   int32_t minute_angle = angle_for_fraction(t->tm_min, 60);
   draw_rotated_rect(ctx, center, hour_angle, hour_hand_w, 0, hour_hand_len, s_discrete_text_color);
   draw_rotated_rect(ctx, center, minute_angle, minute_hand_w, 0, minute_hand_len, s_discrete_text_color);
+
+  // Rounded tips: a filled circle at each hand's far end, same radius as its
+  // own half-width, so the hand reads as a stadium/capsule shape instead of
+  // a hard-cut rectangle. Level hand is excluded - it keeps a flat tip, same
+  // as before, since its length (not just position) already carries meaning
+  // while idle (a sweeping second hand shouldn't visually change shape).
+  GPoint hour_tip = {
+    .x = (int16_t)(center.x + (sin_lookup(hour_angle) * hour_hand_len) / TRIG_MAX_RATIO),
+    .y = (int16_t)(center.y - (cos_lookup(hour_angle) * hour_hand_len) / TRIG_MAX_RATIO),
+  };
+  GPoint minute_tip = {
+    .x = (int16_t)(center.x + (sin_lookup(minute_angle) * minute_hand_len) / TRIG_MAX_RATIO),
+    .y = (int16_t)(center.y - (cos_lookup(minute_angle) * minute_hand_len) / TRIG_MAX_RATIO),
+  };
+  graphics_context_set_fill_color(ctx, s_discrete_text_color);
+  graphics_fill_circle(ctx, hour_tip, hour_hand_w / 2);
+  graphics_fill_circle(ctx, minute_tip, minute_hand_w / 2);
 
   // Level hand: while idle it reverts to true elapsed seconds (an ordinary
   // running second hand); the instant a button is pressed (s_idle clears)
@@ -463,7 +591,13 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
   GPoint center = grect_center_point(&bounds);
   int16_t ring_radius = bounds.size.w / 2;
 
-#if defined(PBL_ROUND)
+#if defined(PBL_PLATFORM_GABBRO)
+  int16_t tick_w = 3, tick_len = 7;
+  int16_t tick_radius = 28;
+  int16_t needle_w = 7, needle_len = 27;
+  int16_t cap_radius = 4;
+  uint8_t ring_stroke = 3;
+#elif defined(PBL_ROUND)
   int16_t tick_w = 2, tick_len = 5;
   int16_t tick_radius = 20;
   int16_t needle_w = 5, needle_len = 19;
@@ -516,6 +650,15 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_circle(ctx, center, cap_radius);
 }
 
+// Shared between drawing and touch hit-testing (handle_pattern_long_press)
+// so the two can never drift apart - "the column you can press" and "the
+// column that's drawn there" are computed by the same formula.
+static int16_t pattern_register_col_x(int16_t bounds_w, int16_t col_w, int index) {
+  return (index == 0) ? 0
+       : (index == PATTERN_COUNT - 1) ? (int16_t)(bounds_w - col_w)
+       : (int16_t)((bounds_w - col_w) / 2);
+}
+
 static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   // Three columns (Steady/Pulse/Wave as I/II/III), space-between, reading
   // as a chrono totalizer. Only the currently selected pattern gets a
@@ -528,17 +671,14 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   int16_t underline_sel_w = emery_px(14, k), underline_sel_h = emery_px(2, k);
   int16_t underline_unsel_w = emery_px(8, k), underline_unsel_h = emery_px(1, k);
   int16_t gap = emery_px(2, k);
+  int16_t glyph_h = emery_px(10, k);
 
-  GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
-  GFont regular_font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
   bool any_selected = s_intensity > 0;
 
   for (int i = 0; i < PATTERN_COUNT; i++) {
     bool selected = any_selected && (i == s_pattern);
     GColor color = selected ? s_discrete_text_color : s_discrete_muted_color;
-    int16_t col_x = (i == 0) ? 0
-                   : (i == PATTERN_COUNT - 1) ? (bounds.size.w - col_w)
-                   : (bounds.size.w - col_w) / 2;
+    int16_t col_x = pattern_register_col_x(bounds.size.w, col_w, i);
     int16_t y = 0;
 
     if (selected) {
@@ -555,10 +695,8 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
       y = (int16_t)(y + tri_h + gap);
     }
 
-    GRect numeral_rect = GRect(col_x, y, col_w, 20);
-    graphics_context_set_text_color(ctx, color);
-    graphics_draw_text(ctx, PATTERN_ROMAN[i], selected ? bold_font : regular_font,
-                        numeral_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    GRect glyph_frame = GRect(col_x, y, col_w, glyph_h);
+    draw_pattern_glyph(ctx, glyph_frame, color, i, selected ? 2 : 1);
 
     int16_t underline_w = selected ? underline_sel_w : underline_unsel_w;
     int16_t underline_h = selected ? underline_sel_h : underline_unsel_h;
@@ -627,6 +765,11 @@ static void show_toy_name_briefly(void) {
 }
 
 // --- Basic UI drawing ---
+
+static void pattern_glyph_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  draw_pattern_glyph(ctx, bounds, s_basic_pattern_color, s_pattern, 2);
+}
 
 static void button_bar_update_proc(Layer *layer, GContext *ctx) {
   // Vector-drawn stand-in for an ActionBarLayer: up/down chevrons and a
@@ -714,9 +857,9 @@ static void apply_basic_colors(void) {
   }
   text_layer_set_text_color(s_intensity_layer, s_basic_text_color);
   text_layer_set_text_color(s_status_layer, s_basic_text_color);
-  text_layer_set_text_color(s_tip_layer, s_basic_text_color);
-  text_layer_set_text_color(s_pattern_layer, s_basic_pattern_color);
+  text_layer_set_text_color(s_tip_layer, s_basic_pattern_color);
   text_layer_set_text_color(s_basic_toy_layer, s_basic_text_color);
+  layer_mark_dirty(s_pattern_layer); // reads s_basic_pattern_color itself on redraw
   layer_mark_dirty(s_button_bar_layer);
 }
 
@@ -760,7 +903,7 @@ static void update_basic_display(void) {
   snprintf(intensity_buf, sizeof(intensity_buf), "%d", s_intensity);
   text_layer_set_text(s_intensity_layer, intensity_buf);
   text_layer_set_text(s_status_layer, s_active ? "VIBRATING" : "PAUSED");
-  text_layer_set_text(s_pattern_layer, PATTERN_NAMES[s_pattern]);
+  layer_mark_dirty(s_pattern_layer);
   layer_mark_dirty(s_button_bar_layer);
 }
 
@@ -820,11 +963,18 @@ static void update_time_display(struct tm *tick_time) {
     return;
   }
 
-  // Steps mode is Digital-only - a walking icon crowded next to the Analog
-  // clock face looked bad, so Analog always shows the date regardless of
-  // the secondary_display setting.
-  bool show_steps = (s_secondary_display == SECONDARY_DISPLAY_STEPS)
-                     && (s_discrete_face == DISCRETE_FACE_CHRONO);
+  // Round (Chalk/Gabbro) Analog has no room for anything but the date - the
+  // face is small and a walking/heart icon crowded next to the hands looked
+  // bad. Rect Analog has the room (see build_analog_face's aperture) and
+  // Digital always did, so both of those honor the full secondary_display
+  // setting (date/steps/heart-rate) the same way.
+#if defined(PBL_ROUND)
+  bool secondary_allowed = (s_discrete_face == DISCRETE_FACE_CHRONO);
+#else
+  bool secondary_allowed = true;
+#endif
+  bool show_steps = secondary_allowed && (s_secondary_display == SECONDARY_DISPLAY_STEPS);
+  bool show_hr = secondary_allowed && (s_secondary_display == SECONDARY_DISPLAY_HR);
 
   static char date_buf[24];
   if (show_steps) {
@@ -862,6 +1012,21 @@ static void update_time_display(struct tm *tick_time) {
       // renderer evidently falls back to an emoji-capable font for
       // unmapped codepoints, the same way notification text does).
       snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
+    }
+  } else if (show_hr) {
+    time_t now = time(NULL);
+    HealthServiceAccessibilityMask access =
+        health_service_metric_accessible(HealthMetricHeartRateBPM, now - 300, now);
+    if (access & HealthServiceAccessibilityMaskNoPermission) {
+      snprintf(date_buf, sizeof(date_buf), "\xE2\x9D\xA4 no-perm");
+    } else if (access & HealthServiceAccessibilityMaskNotSupported) {
+      snprintf(date_buf, sizeof(date_buf), "\xE2\x9D\xA4 n/a");
+    } else {
+      // Unlike steps (an accumulator metric - see sum_today() above), heart
+      // rate is instantaneous, so peek_current_value() is the right call
+      // here, not the same bug in reverse.
+      HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
+      snprintf(date_buf, sizeof(date_buf), "\xE2\x9D\xA4 %d", (int)bpm);
     }
   } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
     strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
@@ -1001,9 +1166,12 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
   }
 }
 
-static void cycle_pattern(int direction) {
+static void select_pattern(int pattern) {
+  if (pattern == s_pattern) {
+    return; // already selected - no redundant haptic/resend
+  }
   reset_idle_timer();
-  s_pattern = (s_pattern + direction + PATTERN_COUNT) % PATTERN_COUNT;
+  s_pattern = pattern;
   vibes_enqueue_custom_pattern(HAPTIC_PATTERNS[s_pattern]);
   update_display();
   // If we're actively vibrating, restart the toy on the newly selected
@@ -1015,6 +1183,154 @@ static void cycle_pattern(int direction) {
     send_command_msg("ping", s_intensity);
   }
 }
+
+static void cycle_pattern(int direction) {
+  select_pattern((s_pattern + direction + PATTERN_COUNT) % PATTERN_COUNT);
+}
+
+#if defined(PBL_TOUCH)
+static void gesture_toggle_play_pause(void) {
+  reset_idle_timer();
+  s_active = !s_active;
+  update_display();
+  vibes_short_pulse();
+  send_command_msg(s_active ? "vibrate" : "pause", s_intensity);
+}
+
+// --- Accelerometer mode (default): two knocks toggle play/pause ---
+
+static void accel_tap_window_expire(void *data) {
+  s_accel_tap_window_timer = NULL; // only one knock arrived - not a double-knock
+}
+
+static void tap_handler(AccelAxisType axis, int32_t direction) {
+  // Digital face only, per the design spec - Analog's disguise relies on
+  // the whole face reading as an ordinary watch.
+  if (s_ui_style != UI_STYLE_DISCRETE || s_discrete_face != DISCRETE_FACE_CHRONO) {
+    return;
+  }
+  if (s_accel_tap_window_timer) {
+    // Second knock within the window - confirmed double-knock. A single
+    // knock alone (e.g. from shaking the watch) never gets this far, since
+    // the first knock only arms the window rather than acting immediately.
+    app_timer_cancel(s_accel_tap_window_timer);
+    s_accel_tap_window_timer = NULL;
+    gesture_toggle_play_pause();
+  } else {
+    s_accel_tap_window_timer = app_timer_register(ACCEL_DOUBLE_TAP_WINDOW_MS,
+                                                   accel_tap_window_expire, NULL);
+  }
+}
+
+// --- Touchscreen mode: the real capacitive touch sensor, not the
+// accelerometer. There's no built-in long-press recognizer in the SDK (only
+// tap/pan/swipe), so both gestures below are built from the raw
+// touch_service event stream ourselves. ---
+
+// A long press directly on the pattern register picks that specific pattern
+// - all three are visible at once there, so "press the one you want" makes
+// sense. Everywhere else only one glyph is ever shown at a time (Analog's
+// 6 o'clock tick, or Gabbro's round Digital face, which has no register at
+// all), so a long press there just cycles to the next pattern instead.
+static void handle_pattern_long_press(GPoint point) {
+  if (s_ui_style != UI_STYLE_DISCRETE) {
+    return;
+  }
+#if !defined(PBL_ROUND)
+  if (s_discrete_face == DISCRETE_FACE_CHRONO && s_register_layer) {
+    GRect register_frame = layer_get_frame(s_register_layer);
+    int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+    int16_t col_w = emery_px(26, k);
+    for (int i = 0; i < PATTERN_COUNT; i++) {
+      int16_t col_x = pattern_register_col_x(register_frame.size.w, col_w, i);
+      GRect col_rect = GRect((int16_t)(register_frame.origin.x + col_x), register_frame.origin.y,
+                              col_w, register_frame.size.h);
+      if (grect_contains_point(&col_rect, &point)) {
+        select_pattern(i);
+        return;
+      }
+    }
+    return; // missed every column - no-op rather than guessing which one
+  }
+#endif
+  cycle_pattern(1);
+}
+
+static void touch_long_press_fire(void *data) {
+  s_touch_long_press_timer = NULL;
+  s_touch_long_press_fired = true;
+  handle_pattern_long_press(s_touch_down_point);
+}
+
+static void touch_tap_window_expire(void *data) {
+  s_touch_tap_window_timer = NULL; // only one quick tap arrived - not a double-tap
+}
+
+static void touch_handler(const TouchEvent *event, void *context) {
+  switch (event->type) {
+    case TouchEvent_Touchdown:
+      s_touch_down_point = GPoint(event->x, event->y);
+      s_touch_moved = false;
+      s_touch_long_press_fired = false;
+      if (s_touch_long_press_timer) {
+        app_timer_cancel(s_touch_long_press_timer);
+      }
+      s_touch_long_press_timer = app_timer_register(TOUCH_LONG_PRESS_MS, touch_long_press_fire, NULL);
+      break;
+
+    case TouchEvent_PositionUpdate: {
+      if (s_touch_moved) {
+        break;
+      }
+      int16_t dx = (int16_t)(event->x - s_touch_down_point.x);
+      int16_t dy = (int16_t)(event->y - s_touch_down_point.y);
+      bool moved = dx > TOUCH_MOVE_THRESHOLD_PX || dx < -TOUCH_MOVE_THRESHOLD_PX
+                 || dy > TOUCH_MOVE_THRESHOLD_PX || dy < -TOUCH_MOVE_THRESHOLD_PX;
+      if (moved) {
+        s_touch_moved = true;
+        if (s_touch_long_press_timer) {
+          app_timer_cancel(s_touch_long_press_timer);
+          s_touch_long_press_timer = NULL;
+        }
+      }
+      break;
+    }
+
+    case TouchEvent_Liftoff:
+      if (s_touch_long_press_timer) {
+        app_timer_cancel(s_touch_long_press_timer);
+        s_touch_long_press_timer = NULL;
+      }
+      if (s_touch_long_press_fired || s_touch_moved) {
+        break; // already handled as a long press, or this was a drag
+      }
+      if (s_touch_tap_window_timer) {
+        // Second quick tap within the window - confirmed double-tap.
+        app_timer_cancel(s_touch_tap_window_timer);
+        s_touch_tap_window_timer = NULL;
+        gesture_toggle_play_pause();
+      } else {
+        s_touch_tap_window_timer = app_timer_register(TOUCH_DOUBLE_TAP_WINDOW_MS,
+                                                       touch_tap_window_expire, NULL);
+      }
+      break;
+  }
+}
+
+static void apply_touch_mode(void) {
+  accel_tap_service_unsubscribe();
+  touch_service_unsubscribe();
+  if (s_touch_mode == TOUCH_MODE_ACCEL) {
+    accel_tap_service_subscribe(tap_handler);
+  } else if (s_touch_mode == TOUCH_MODE_TOUCHSCREEN) {
+    touch_service_subscribe(touch_handler, NULL);
+  }
+  // TOUCH_MODE_OFF: leave both unsubscribed - buttons only.
+}
+#else
+static void apply_touch_mode(void) {
+}
+#endif // PBL_TOUCH
 
 static void up_long_click_handler(ClickRecognizerRef recognizer, void *context) {
   cycle_pattern(1);
@@ -1094,12 +1410,15 @@ static void build_basic_ui(Layer *window_layer, GRect bounds) {
   text_layer_set_text(s_status_layer, "PAUSED");
   layer_add_child(s_basic_container, text_layer_get_layer(s_status_layer));
 
-  s_pattern_layer = text_layer_create(GRect(content_x, content_h / 2 + 20, basic_width, 22));
-  text_layer_set_background_color(s_pattern_layer, GColorClear);
-  text_layer_set_font(s_pattern_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_pattern_layer, GTextAlignmentCenter);
-  text_layer_set_text(s_pattern_layer, "STEADY");
-  layer_add_child(s_basic_container, text_layer_get_layer(s_pattern_layer));
+  // Small vector glyph (see draw_pattern_glyph) in place of the old
+  // "STEADY"/"PULSE"/"WAVE" text label - centered in the same slot.
+  int16_t pattern_glyph_w = 40, pattern_glyph_h = 16;
+  GRect pattern_glyph_frame = GRect((int16_t)(content_x + (basic_width - pattern_glyph_w) / 2),
+                                     (int16_t)(content_h / 2 + 20 + (22 - pattern_glyph_h) / 2),
+                                     pattern_glyph_w, pattern_glyph_h);
+  s_pattern_layer = layer_create(pattern_glyph_frame);
+  layer_set_update_proc(s_pattern_layer, pattern_glyph_update_proc);
+  layer_add_child(s_basic_container, s_pattern_layer);
 
 #if defined(PBL_ROUND)
   s_tip_layer = text_layer_create(GRect(content_x + 4, content_h - 30, basic_width - 8, 34));
@@ -1144,7 +1463,7 @@ static void teardown_basic_ui(void) {
   s_intensity_layer = NULL;
   text_layer_destroy(s_status_layer);
   s_status_layer = NULL;
-  text_layer_destroy(s_pattern_layer);
+  layer_destroy(s_pattern_layer);
   s_pattern_layer = NULL;
   text_layer_destroy(s_tip_layer);
   s_tip_layer = NULL;
@@ -1158,7 +1477,11 @@ static void teardown_basic_ui(void) {
 }
 
 static void build_analog_face(GRect bounds) {
-#if defined(PBL_ROUND)
+#if defined(PBL_PLATFORM_GABBRO)
+  GRect hands_frame = GRect(50, 50, 160, 160);
+  GRect date_frame = GRect(147, 119, 64, 22);
+  GRect status_frame = GRect(75, 218, 110, 18);
+#elif defined(PBL_ROUND)
   GRect hands_frame = GRect(90 - 59, 90 - 59, 118, 118);
   GRect date_frame = GRect(102, 83, 48, 19);
   GRect status_frame = GRect(55, 147, 70, 15);
@@ -1182,8 +1505,6 @@ static void build_analog_face(GRect bounds) {
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(s_discrete_container, text_layer_get_layer(s_date_layer));
-  // Steps mode is Digital-only (see update_time_display) - Analog always
-  // shows the date regardless of the secondary_display setting.
 
   s_status_row_layer = layer_create(status_frame);
   layer_set_update_proc(s_status_row_layer, status_row_update_proc);
@@ -1191,7 +1512,12 @@ static void build_analog_face(GRect bounds) {
 }
 
 static void build_chrono_face(GRect bounds) {
-#if defined(PBL_ROUND)
+#if defined(PBL_PLATFORM_GABBRO)
+  GRect status_frame = GRect(65, 38, 130, 22);
+  GRect time_frame = GRect(0, 68, bounds.size.w, 56);
+  GRect date_frame = GRect(0, 132, bounds.size.w, 22);
+  GRect subdial_frame = GRect(95, 158, 70, 70);
+#elif defined(PBL_ROUND)
   GRect status_frame = GRect(50, 28, 80, 17);
   GRect time_frame = GRect(0, 48, bounds.size.w, 42);
   GRect date_frame = GRect(0, 91, bounds.size.w, 16);
@@ -1409,6 +1735,13 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     refresh_discrete_time();
   }
 
+  Tuple *touch_mode_tuple = dict_find(iterator, MESSAGE_KEY_touch_play_mode);
+  if (touch_mode_tuple) {
+    s_touch_mode = (int)touch_mode_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_TOUCH_MODE, s_touch_mode);
+    apply_touch_mode();
+  }
+
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
   if (bg_tuple) {
     s_basic_bg_color = parse_hex_color(bg_tuple->value->cstring);
@@ -1473,10 +1806,22 @@ static void inbox_dropped_callback(AppMessageResult reason, void *context) {
 static void window_load(Window *window) {
   log_heap("window_load start");
   switch_ui_style(); // builds whichever style s_ui_style currently indicates
+  // A no-op on non-touch platforms. Subscribes for the window's whole
+  // lifetime regardless of the current s_touch_mode/s_ui_style/
+  // s_discrete_face - those can all change at runtime via AppMessage
+  // without a window reload, so the handlers check them on every event
+  // rather than this needing to resubscribe on every settings change; it's
+  // only called again from inbox_received_callback when s_touch_mode itself
+  // changes, to switch which service is actually subscribed.
+  apply_touch_mode();
   log_heap("window_load end");
 }
 
 static void window_unload(Window *window) {
+#if defined(PBL_TOUCH)
+  accel_tap_service_unsubscribe();
+  touch_service_unsubscribe();
+#endif
   teardown_basic_ui();
   teardown_discrete_ui();
 }
@@ -1523,6 +1868,9 @@ static void init(void) {
   s_secondary_display = persist_exists(PERSIST_KEY_SECONDARY_DISPLAY)
     ? persist_read_int(PERSIST_KEY_SECONDARY_DISPLAY)
     : SECONDARY_DISPLAY_DATE;
+  s_touch_mode = persist_exists(PERSIST_KEY_TOUCH_MODE)
+    ? persist_read_int(PERSIST_KEY_TOUCH_MODE)
+    : TOUCH_MODE_ACCEL;
 
   recompute_basic_pattern_color();
   recompute_discrete_muted();

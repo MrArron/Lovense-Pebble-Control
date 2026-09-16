@@ -6,6 +6,13 @@
 
 var DEFAULT_PORT = '20010';
 
+// Cap on toy/group names shown on the watch. Empirically verified against
+// Chalk's basic_width (the narrowest case, ~160px) with the persistent
+// "<name> - <battery>%" row's GOTHIC_14 font: 9 name chars + " - 100%"
+// fits cleanly, 10 already touches both edges. No per-platform signal is
+// available here in JS, so this one cap applies to every platform.
+var TOY_NAME_MAX_CHARS = 9;
+
 // Escapes text before it's spliced into the generated settings-page HTML.
 // Needed anywhere a value could come from outside this device's own saved
 // settings - toy id/name come from the Lovense LAN API (GetToys/Events
@@ -21,6 +28,18 @@ function escapeHtml(s) {
 function getSetting(key, fallback) {
   var val = localStorage.getItem(key);
   return (val === null || val === undefined || val === '') ? fallback : val;
+}
+
+// Like getSetting(), but for a fixed set of valid string values (radio
+// groups) - also falls back when the stored value is present but isn't one
+// of validValues, e.g. a leftover value from a previous version of this
+// setting (a boolean checkbox saved "true"/"false" as a plain string before
+// a later version turned it into a 3-way radio group). Without this, a
+// stale value that doesn't match any option leaves the whole group
+// unchecked in the rendered HTML instead of showing the default.
+function getEnumSetting(key, validValues, fallback) {
+  var val = getSetting(key, fallback);
+  return validValues.indexOf(val) !== -1 ? val : fallback;
 }
 
 function buildUrl() {
@@ -126,7 +145,7 @@ function appendToyGroups(list, knownIds) {
     if (ids.length === 0) {
       return; // every member is stale - skip rather than keep a dead entry
     }
-    list.push({ id: ids, name: (g.name || '').substring(0, 20) });
+    list.push({ id: ids, name: (g.name || '').substring(0, TOY_NAME_MAX_CHARS) });
   });
 }
 
@@ -138,7 +157,7 @@ function setToyListFromEntries(entries) {
     // API's uses 'nickname' (lowercase) - check both rather than guess.
     var nick = t.nickName || t.nickname;
     var label = (nick && nick.length) ? nick : t.name;
-    list.push({ id: t.id, name: (label || t.id || '').substring(0, 20) });
+    list.push({ id: t.id, name: (label || t.id || '').substring(0, TOY_NAME_MAX_CHARS) });
     knownIds[t.id] = true;
     if (typeof t.battery === 'number') {
       s_toyBattery[t.id] = t.battery;
@@ -534,10 +553,20 @@ function sendDiscreteFaceToWatch(face) {
 }
 
 function sendSecondaryDisplayToWatch(mode) {
-  queueAppMessage({ secondary_display: mode === 'steps' ? 1 : 0 }, function () {
+  var value = mode === 'steps' ? 1 : (mode === 'heartrate' ? 2 : 0);
+  queueAppMessage({ secondary_display: value }, function () {
     // delivered
   }, function () {
     console.log('Failed to send secondary display mode to watch.');
+  });
+}
+
+function sendTouchPlayModeToWatch(mode) {
+  var value = mode === 'touchscreen' ? 1 : (mode === 'off' ? 2 : 0);
+  queueAppMessage({ touch_play_mode: value }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send touch play mode to watch.');
   });
 }
 
@@ -592,6 +621,7 @@ Pebble.addEventListener('ready', function () {
   sendUiStyleToWatch(getSetting('lovenseUiStyle', 'basic'));
   sendDiscreteFaceToWatch(getSetting('discreteFace', 'analog'));
   sendSecondaryDisplayToWatch(getSetting('secondaryDisplay', 'date'));
+  sendTouchPlayModeToWatch(getSetting('touchPlayMode', 'accel'));
   sendBasicColorsToWatch();
   sendDiscreteColorsToWatch();
   sendDiscreteActiveColorToWatch();
@@ -643,21 +673,27 @@ Pebble.addEventListener('appmessage', function (e) {
 Pebble.addEventListener('showConfiguration', function () {
   var host = encodeURIComponent(getSetting('lovenseHost', ''));
   var port = encodeURIComponent(getSetting('lovensePort', DEFAULT_PORT));
-  var uiStyle = getSetting('lovenseUiStyle', 'basic');
+  var uiStyle = getEnumSetting('lovenseUiStyle', ['basic', 'discrete'], 'basic');
   var basicChecked = uiStyle === 'basic' ? 'checked' : '';
   var discreteChecked = uiStyle === 'discrete' ? 'checked' : '';
 
-  var discreteFace = getSetting('discreteFace', 'analog');
+  var discreteFace = getEnumSetting('discreteFace', ['analog', 'chrono'], 'analog');
   var faceAnalogChecked = discreteFace === 'analog' ? 'checked' : '';
   var faceChronoChecked = discreteFace === 'chrono' ? 'checked' : '';
 
-  var batterySource = getSetting('batterySource', 'watch');
+  var batterySource = getEnumSetting('batterySource', ['watch', 'toy'], 'watch');
   var batteryWatchChecked = batterySource === 'watch' ? 'checked' : '';
   var batteryToyChecked = batterySource === 'toy' ? 'checked' : '';
 
-  var secondaryDisplay = getSetting('secondaryDisplay', 'date');
+  var secondaryDisplay = getEnumSetting('secondaryDisplay', ['date', 'steps', 'heartrate'], 'date');
   var secondaryDateChecked = secondaryDisplay === 'date' ? 'checked' : '';
   var secondaryStepsChecked = secondaryDisplay === 'steps' ? 'checked' : '';
+  var secondaryHeartrateChecked = secondaryDisplay === 'heartrate' ? 'checked' : '';
+
+  var touchPlayMode = getEnumSetting('touchPlayMode', ['accel', 'touchscreen', 'off'], 'accel');
+  var touchAccelChecked = touchPlayMode === 'accel' ? 'checked' : '';
+  var touchScreenChecked = touchPlayMode === 'touchscreen' ? 'checked' : '';
+  var touchOffChecked = touchPlayMode === 'off' ? 'checked' : '';
 
   // Basic's fields are the single source of truth for the unified Custom-tab
   // swatches (see swatchRow() below) - Discrete's own basic_bg_color etc.
@@ -842,12 +878,31 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div class="radio-row"><input type="radio" name="discreteFace" id="face-chrono" value="chrono" ' + faceChronoChecked + '>' +
     '<label for="face-chrono" style="display:inline;margin:0">Digital — digital time with a chrono sub-dial</label></div>' +
 
+    '<label style="margin-top:20px">Gesture control</label>' +
+    '<p class="hint">Emery &amp; Gabbro only. Pause/resume without pressing a button.</p>' +
+    '<div class="radio-row"><input type="radio" name="touchPlayMode" id="touch-accel" value="accel" ' + touchAccelChecked + '>' +
+    '<label for="touch-accel" style="display:inline;margin:0">Double-knock the watch — accelerometer, no touchscreen needed</label></div>' +
+    '<div class="radio-row"><input type="radio" name="touchPlayMode" id="touch-screen" value="touchscreen" ' + touchScreenChecked + '>' +
+    '<label for="touch-screen" style="display:inline;margin:0">Touchscreen — double-tap anywhere to pause/resume, long-press a pattern icon to change pattern</label></div>' +
+    '<div class="radio-row"><input type="radio" name="touchPlayMode" id="touch-off" value="off" ' + touchOffChecked + '>' +
+    '<label for="touch-off" style="display:inline;margin:0">Off — side buttons only</label></div>' +
+
     '<label style="margin-top:20px">Secondary display</label>' +
-    '<p class="hint">Digital face only - Analog always shows the date.</p>' +
+    '<p class="hint">Digital face always; Analog face on rectangular watches only (round has no room).</p>' +
     '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-date" value="date" ' + secondaryDateChecked + '>' +
     '<label for="secondary-date" style="display:inline;margin:0">Date — day and date</label></div>' +
     '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-steps" value="steps" ' + secondaryStepsChecked + '>' +
     '<label for="secondary-steps" style="display:inline;margin:0">Steps — today\'s step count</label></div>' +
+    '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-heartrate" value="heartrate" ' + secondaryHeartrateChecked + '>' +
+    '<label for="secondary-heartrate" style="display:inline;margin:0">Heart rate — current BPM</label></div>' +
+
+    '<div class="card">' +
+    '<p class="title">Battery row (Basic mode)</p>' +
+    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-watch" value="watch" ' + batteryWatchChecked + '>' +
+    '<label for="batt-watch" style="display:inline;margin:0">Watch\'s own battery</label></div>' +
+    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-toy" value="toy" ' + batteryToyChecked + '>' +
+    '<label for="batt-toy" style="display:inline;margin:0">Selected toy\'s battery</label></div>' +
+    '</div>' +
 
     '<div class="tabs">' +
     '<div class="tab active" id="tab-presets" onclick="showTab(\'presets\')">Presets</div>' +
@@ -900,14 +955,6 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div id="groupList"></div>' +
     '<input type="text" id="newGroupName" placeholder="Group name" style="margin-top:10px">' +
     '<button type="button" class="secondary" onclick="saveGroup()">Save group</button>' +
-    '</div>' +
-
-    '<div class="card">' +
-    '<p class="title">Battery row (Basic mode)</p>' +
-    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-watch" value="watch" ' + batteryWatchChecked + '>' +
-    '<label for="batt-watch" style="display:inline;margin:0">Watch\'s own battery</label></div>' +
-    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-toy" value="toy" ' + batteryToyChecked + '>' +
-    '<label for="batt-toy" style="display:inline;margin:0">Selected toy\'s battery</label></div>' +
     '</div>' +
     '</div>' +
 
@@ -1172,6 +1219,8 @@ Pebble.addEventListener('showConfiguration', function () {
     'batterySource=batterySource?batterySource.value:"watch";' +
     'var secondaryDisplay=document.querySelector(\'input[name="secondaryDisplay"]:checked\');' +
     'secondaryDisplay=secondaryDisplay?secondaryDisplay.value:"date";' +
+    'var touchPlayMode=document.querySelector(\'input[name="touchPlayMode"]:checked\');' +
+    'touchPlayMode=touchPlayMode?touchPlayMode.value:"accel";' +
     'var result={' +
     'lovenseHost:host,' +
     'lovensePort:port,' +
@@ -1179,6 +1228,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'discreteFace:discreteFace,' +
     'batterySource:batterySource,' +
     'secondaryDisplay:secondaryDisplay,' +
+    'touchPlayMode:touchPlayMode,' +
     'basicColorBg:document.getElementById("basicColorBg").value,' +
     'basicColorText:document.getElementById("basicColorText").value,' +
     'basicColorAccent:document.getElementById("basicColorAccent").value,' +
@@ -1228,6 +1278,10 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.secondaryDisplay !== undefined) {
       localStorage.setItem('secondaryDisplay', settings.secondaryDisplay);
       sendSecondaryDisplayToWatch(settings.secondaryDisplay);
+    }
+    if (settings.touchPlayMode !== undefined) {
+      localStorage.setItem('touchPlayMode', settings.touchPlayMode);
+      sendTouchPlayModeToWatch(settings.touchPlayMode);
     }
     if (settings.batterySource !== undefined) {
       localStorage.setItem('batterySource', settings.batterySource);
