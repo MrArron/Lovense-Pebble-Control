@@ -6,6 +6,13 @@
 
 var DEFAULT_PORT = '20010';
 
+// Cap on toy/group names shown on the watch. Empirically verified against
+// Chalk's basic_width (the narrowest case, ~160px) with the persistent
+// "<name> - <battery>%" row's GOTHIC_14 font: 9 name chars + " - 100%"
+// fits cleanly, 10 already touches both edges. No per-platform signal is
+// available here in JS, so this one cap applies to every platform.
+var TOY_NAME_MAX_CHARS = 9;
+
 // Escapes text before it's spliced into the generated settings-page HTML.
 // Needed anywhere a value could come from outside this device's own saved
 // settings - toy id/name come from the Lovense LAN API (GetToys/Events
@@ -126,7 +133,7 @@ function appendToyGroups(list, knownIds) {
     if (ids.length === 0) {
       return; // every member is stale - skip rather than keep a dead entry
     }
-    list.push({ id: ids, name: (g.name || '').substring(0, 20) });
+    list.push({ id: ids, name: (g.name || '').substring(0, TOY_NAME_MAX_CHARS) });
   });
 }
 
@@ -138,7 +145,7 @@ function setToyListFromEntries(entries) {
     // API's uses 'nickname' (lowercase) - check both rather than guess.
     var nick = t.nickName || t.nickname;
     var label = (nick && nick.length) ? nick : t.name;
-    list.push({ id: t.id, name: (label || t.id || '').substring(0, 20) });
+    list.push({ id: t.id, name: (label || t.id || '').substring(0, TOY_NAME_MAX_CHARS) });
     knownIds[t.id] = true;
     if (typeof t.battery === 'number') {
       s_toyBattery[t.id] = t.battery;
@@ -534,10 +541,19 @@ function sendDiscreteFaceToWatch(face) {
 }
 
 function sendSecondaryDisplayToWatch(mode) {
-  queueAppMessage({ secondary_display: mode === 'steps' ? 1 : 0 }, function () {
+  var value = mode === 'steps' ? 1 : (mode === 'heartrate' ? 2 : 0);
+  queueAppMessage({ secondary_display: value }, function () {
     // delivered
   }, function () {
     console.log('Failed to send secondary display mode to watch.');
+  });
+}
+
+function sendTouchPlayModeToWatch(enabled) {
+  queueAppMessage({ touch_play_mode: enabled ? 1 : 0 }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send touch play mode to watch.');
   });
 }
 
@@ -592,6 +608,7 @@ Pebble.addEventListener('ready', function () {
   sendUiStyleToWatch(getSetting('lovenseUiStyle', 'basic'));
   sendDiscreteFaceToWatch(getSetting('discreteFace', 'analog'));
   sendSecondaryDisplayToWatch(getSetting('secondaryDisplay', 'date'));
+  sendTouchPlayModeToWatch(getSetting('touchPlayMode', 'false') === 'true');
   sendBasicColorsToWatch();
   sendDiscreteColorsToWatch();
   sendDiscreteActiveColorToWatch();
@@ -658,6 +675,10 @@ Pebble.addEventListener('showConfiguration', function () {
   var secondaryDisplay = getSetting('secondaryDisplay', 'date');
   var secondaryDateChecked = secondaryDisplay === 'date' ? 'checked' : '';
   var secondaryStepsChecked = secondaryDisplay === 'steps' ? 'checked' : '';
+  var secondaryHeartrateChecked = secondaryDisplay === 'heartrate' ? 'checked' : '';
+
+  var touchPlayMode = getSetting('touchPlayMode', 'false') === 'true';
+  var touchPlayChecked = touchPlayMode ? 'checked' : '';
 
   // Basic's fields are the single source of truth for the unified Custom-tab
   // swatches (see swatchRow() below) - Discrete's own basic_bg_color etc.
@@ -842,12 +863,27 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div class="radio-row"><input type="radio" name="discreteFace" id="face-chrono" value="chrono" ' + faceChronoChecked + '>' +
     '<label for="face-chrono" style="display:inline;margin:0">Digital — digital time with a chrono sub-dial</label></div>' +
 
+    '<label style="margin-top:20px">Touch play mode</label>' +
+    '<p class="hint">Emery &amp; Gabbro only, Digital face. Tap the watch face to pause/resume.</p>' +
+    '<div class="radio-row"><input type="checkbox" id="touchPlayMode" ' + touchPlayChecked + '>' +
+    '<label for="touchPlayMode" style="display:inline;margin:0">Enable tap to pause/resume</label></div>' +
+
     '<label style="margin-top:20px">Secondary display</label>' +
-    '<p class="hint">Digital face only - Analog always shows the date.</p>' +
+    '<p class="hint">Digital face always; Analog face on rectangular watches only (round has no room).</p>' +
     '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-date" value="date" ' + secondaryDateChecked + '>' +
     '<label for="secondary-date" style="display:inline;margin:0">Date — day and date</label></div>' +
     '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-steps" value="steps" ' + secondaryStepsChecked + '>' +
     '<label for="secondary-steps" style="display:inline;margin:0">Steps — today\'s step count</label></div>' +
+    '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-heartrate" value="heartrate" ' + secondaryHeartrateChecked + '>' +
+    '<label for="secondary-heartrate" style="display:inline;margin:0">Heart rate — current BPM</label></div>' +
+
+    '<div class="card">' +
+    '<p class="title">Battery row (Basic mode)</p>' +
+    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-watch" value="watch" ' + batteryWatchChecked + '>' +
+    '<label for="batt-watch" style="display:inline;margin:0">Watch\'s own battery</label></div>' +
+    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-toy" value="toy" ' + batteryToyChecked + '>' +
+    '<label for="batt-toy" style="display:inline;margin:0">Selected toy\'s battery</label></div>' +
+    '</div>' +
 
     '<div class="tabs">' +
     '<div class="tab active" id="tab-presets" onclick="showTab(\'presets\')">Presets</div>' +
@@ -900,14 +936,6 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div id="groupList"></div>' +
     '<input type="text" id="newGroupName" placeholder="Group name" style="margin-top:10px">' +
     '<button type="button" class="secondary" onclick="saveGroup()">Save group</button>' +
-    '</div>' +
-
-    '<div class="card">' +
-    '<p class="title">Battery row (Basic mode)</p>' +
-    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-watch" value="watch" ' + batteryWatchChecked + '>' +
-    '<label for="batt-watch" style="display:inline;margin:0">Watch\'s own battery</label></div>' +
-    '<div class="radio-row"><input type="radio" name="batterySource" id="batt-toy" value="toy" ' + batteryToyChecked + '>' +
-    '<label for="batt-toy" style="display:inline;margin:0">Selected toy\'s battery</label></div>' +
     '</div>' +
     '</div>' +
 
@@ -1172,6 +1200,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'batterySource=batterySource?batterySource.value:"watch";' +
     'var secondaryDisplay=document.querySelector(\'input[name="secondaryDisplay"]:checked\');' +
     'secondaryDisplay=secondaryDisplay?secondaryDisplay.value:"date";' +
+    'var touchPlayMode=document.getElementById("touchPlayMode").checked;' +
     'var result={' +
     'lovenseHost:host,' +
     'lovensePort:port,' +
@@ -1179,6 +1208,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'discreteFace:discreteFace,' +
     'batterySource:batterySource,' +
     'secondaryDisplay:secondaryDisplay,' +
+    'touchPlayMode:touchPlayMode,' +
     'basicColorBg:document.getElementById("basicColorBg").value,' +
     'basicColorText:document.getElementById("basicColorText").value,' +
     'basicColorAccent:document.getElementById("basicColorAccent").value,' +
@@ -1228,6 +1258,10 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.secondaryDisplay !== undefined) {
       localStorage.setItem('secondaryDisplay', settings.secondaryDisplay);
       sendSecondaryDisplayToWatch(settings.secondaryDisplay);
+    }
+    if (settings.touchPlayMode !== undefined) {
+      localStorage.setItem('touchPlayMode', settings.touchPlayMode);
+      sendTouchPlayModeToWatch(settings.touchPlayMode);
     }
     if (settings.batterySource !== undefined) {
       localStorage.setItem('batterySource', settings.batterySource);
