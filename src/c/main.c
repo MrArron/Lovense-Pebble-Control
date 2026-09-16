@@ -388,10 +388,15 @@ static void status_row_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_circle(ctx, dot_center, 5);
   }
 
-  static char battery_buf[8];
+  static char battery_buf[16];
   BatteryChargeState battery = battery_state_service_peek();
-  snprintf(battery_buf, sizeof(battery_buf), "%d%%", battery.charge_percent);
-  GRect batt_rect = GRect(bounds.size.w - 50, 0, 50, bounds.size.h);
+  // TEMPORARY emoji re-test #2: simplest possible surface - battery % is
+  // always present, never zero/permission-gated, so this isolates the
+  // "does this codepoint render on real hardware at all" question
+  // completely from the HealthService permission/accessibility mess.
+  // Revert to a plain "%d%%" if this doesn't render either.
+  snprintf(battery_buf, sizeof(battery_buf), "\xF0\x9F\x9A\xB6 %d%%", battery.charge_percent);
+  GRect batt_rect = GRect(bounds.size.w - 70, 0, 70, bounds.size.h);
   graphics_context_set_text_color(ctx, s_discrete_muted_color);
   graphics_draw_text(ctx, battery_buf, font, batt_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 }
