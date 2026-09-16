@@ -379,7 +379,10 @@ static void status_row_update_proc(Layer *layer, GContext *ctx) {
     if (s_bt_blink_on) {
       graphics_context_set_stroke_color(ctx, s_discrete_muted_color);
       graphics_context_set_stroke_width(ctx, 2);
-      graphics_draw_circle(ctx, dot_center, 5);
+      // graphics_draw_arc() full-sweep instead of graphics_draw_circle() -
+      // see the sub-dial ring comment in chrono_subdial_update_proc for why.
+      GRect dot_rect = GRect((int16_t)(dot_center.x - 5), (int16_t)(dot_center.y - 5), 10, 10);
+      graphics_draw_arc(ctx, dot_rect, GOvalScaleModeFitCircle, 0, 2 * TRIG_MAX_ANGLE);
     }
   } else {
     graphics_context_set_fill_color(ctx, s_bt_state == BT_STATE_CONNECTED ? s_discrete_muted_color : GColorRed);
@@ -486,7 +489,16 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
 
   graphics_context_set_stroke_color(ctx, ring_color);
   graphics_context_set_stroke_width(ctx, ring_stroke);
-  graphics_draw_circle(ctx, center, ring_radius);
+  // graphics_draw_circle() uses an older midpoint-circle algorithm that can
+  // render flattened/straight-line artifacts on the left and right edges
+  // on real hardware at certain radii (confirmed on a real Pebble Time 2 -
+  // never showed up in the emulator, which apparently rasterizes circles
+  // more precisely). graphics_draw_arc() swept a full 360 degrees uses a
+  // different, more robust rendering path and is the modern recommended
+  // way to draw a full circle outline.
+  GRect ring_rect = GRect((int16_t)(center.x - ring_radius), (int16_t)(center.y - ring_radius),
+                           (int16_t)(ring_radius * 2), (int16_t)(ring_radius * 2));
+  graphics_draw_arc(ctx, ring_rect, GOvalScaleModeFitCircle, 0, 2 * TRIG_MAX_ANGLE);
 
   for (int q = 0; q < 4; q++) {
     draw_rotated_rect(ctx, center, angle_for_fraction(q, 4), tick_w,

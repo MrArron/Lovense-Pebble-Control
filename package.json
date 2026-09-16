@@ -1,7 +1,7 @@
 {
   "name": "lovense-remote",
   "author": "you",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
