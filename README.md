@@ -11,38 +11,47 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Confirmed working on real Pebble Time 2 hardware**: boot, Basic mode, both
-Discrete faces (Analog/Digital) render and the idle-revert behavior works as
-designed. Real-device testing also surfaced three bugs, now fixed - see
-"Fixed this pass" below.
+**Published**, current version **1.1.2**. Confirmed working on real Pebble
+Time 2 (Emery) hardware: boot, Basic mode, both Discrete faces, the gesture
+control options (accelerometer double-knock and the touchscreen's double-tap/
+long-press), and the settings page. Chalk and Gabbro (both round) have only
+been verified in the emulator - no round hardware has been available to test
+against yet.
 
-**Local build/test toolchain**: this project now builds and runs locally via
+**Local build/test toolchain**: this project builds and runs locally via
 `pebble-tool` + the Pebble SDK (WSL/Ubuntu, since the SDK doesn't run on
 Windows directly) — `pebble build`, `pebble install --emulator <platform>`,
-and `pebble screenshot`/`emu-app-config` all work against this repo. Two
-build-breaking bugs this surfaced and fixed: the repo was missing the
-`wscript` build script pebble-tool requires, and `package.json`'s launcher
-icon was declared as two separate `menuIcon: true` resources, which the
-SDK's appinfo generator rejects outright (collapsed to one entry using the
-standard `~bw`/`~color` filename-tag convention). `enableMultiJS: true` was
-also added, which is required for the settings webview to run under
-`pebble-tool`'s local JS engine (`pypkjs`) at all. Targets now also include
-`flint` (Pebble 2 Duo) alongside the original five.
+`pebble screenshot`/`emu-app-config`, and `pebble publish` (release notes +
+screenshot/GIF upload) all work against this repo. Two build-breaking bugs
+this surfaced early on and fixed: the repo was missing the `wscript` build
+script pebble-tool requires, and `package.json`'s launcher icon was declared
+as two separate `menuIcon: true` resources, which the SDK's appinfo generator
+rejects outright (collapsed to one entry using the standard `~bw`/`~color`
+filename-tag convention). `enableMultiJS: true` was also added, which is
+required for the settings webview to run under `pebble-tool`'s local JS
+engine (`pypkjs`) at all. Targets now also include `flint` (Pebble 2 Duo) and
+`gabbro` (Pebble Round 2) alongside the original five.
 
 **Discrete mode has two selectable faces** — see "Display styles" below:
 
 - **Analog** — an ordinary analog watch face; the second hand encodes
   vibration level (position + color), reverting to true seconds after the
-  idle stand-down period.
+  idle stand-down period. Hour/minute hands have rounded tips, and the
+  6 o'clock tick is replaced by a small vector glyph (flat line/square
+  wave/sine curve) showing the current pattern.
 - **Digital** — digital time with a chronograph-style sub-dial at 6 o'clock
-  encoding level, plus a Steady/Pulse/Wave totalizer register.
+  encoding level, plus a Steady/Pulse/Wave totalizer register drawn as the
+  same waveform glyphs (originally Roman numerals I/II/III, replaced in a
+  later design pass).
 
 Both faces share the existing bezel/background/text color model plus an
 independent **active (vibrating) color**, default Lovense pink (`#FF2D89`,
 per Lovense's own site), never reset by presets. Non-Emery rectangular
-platforms (aplite/basalt/diorite) get every Emery-derived layout constant
-scaled proportionally rather than clipped; Chalk keeps its own hand-tuned
-numbers.
+platforms (aplite/basalt/diorite/flint) get every Emery-derived layout
+constant scaled proportionally rather than clipped; Chalk and Gabbro (both
+round) keep their own hand-tuned numbers per platform — Gabbro's screen is
+260×260 versus Chalk's 180×180, so it needed its own constants rather than a
+simple scale-up (see "Round display support" below).
 
 Also built: a **Toy Settings** tab (status, Test connection/Test vibration
 buttons that talk to the Lovense API directly from the settings page, custom
@@ -57,30 +66,17 @@ mid-session. The default color scheme (both display styles) is now the
 "Lovense pink" preset, and the watch has a launcher icon based on Lovense's
 logo (`resources/images/icon~color.png` / `icon~bw.png`).
 
-**Fixed this pass** (found via real-hardware testing): `GetToys`'s `toys`
-field is a JSON-**encoded string**, not a plain object — `Object.keys()` on
-it was iterating characters, not toy entries, which broke toy-name display,
-the BT status, and the settings page's "Test connection" toy count (it was
-reporting the JSON blob's character count). Also: the analog/chrono hands'
-thinnest widths degenerated to a hairline at most rotation angles due to
-Pebble's fixed-point trig truncating at `half_width=1`; and Basic mode's
-idle timer (now removed) and tip text (now shifted up) were clipped by the
-watch's physical bezel.
-
-**Untested**: this pass's changes haven't run on real hardware yet - needs
-a `pebble build`/`pebble install` round. Chalk (round display) remains
-untested on physical hardware.
-
 **Deferred, not yet built**: persisting the selected pattern/toy across app
-restarts, and real-hardware testing/layout tuning for Chalk. See "Extending
-it" at the bottom.
+restarts, real-hardware testing/layout tuning for Chalk and Gabbro, and a
+marketing GIF refresh once round hardware is available to shoot on. See
+"Extending it" at the bottom.
 
 **To resume this work in a new session**, the most useful things to paste
 back in are: this README (has all the design decisions and reasoning), and
-either this zip or a description of what's changed since if you've made
-manual edits. The project's current UUID, message-key list, and persisted-
-storage key numbering are all in `package.json`/`main.c` and shouldn't need
-to change for any of the deferred features above.
+a description of what's changed since if you've made manual edits. The
+project's current UUID, message-key list, and persisted-storage key
+numbering are all in `package.json`/`main.c` and shouldn't need to change
+for any of the deferred features above.
 
 ## What's included
 
@@ -91,9 +87,10 @@ to change for any of the deferred features above.
   resources; `heap_bytes_free()`/`heap_bytes_used()` are still logged at
   every major lifecycle point (kept in place through active development).
   Includes Discrete's 10s idle-revert-to-real-seconds (Analog/Digital hand
-  position, not Basic — see "Idle behavior"), the round-display (Chalk)
-  layout variant, and the edge-to-edge bezel fix — see their own sections
-  below.
+  position, not Basic — see "Idle behavior"), the round-display (Chalk,
+  Gabbro) layout variants, gesture control (accelerometer/touchscreen/off —
+  Emery/Gabbro only), and the edge-to-edge bezel fix — see their own
+  sections below.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
   Lovense Standard API calls (`POST /command`), including native Pulse/Wave
   pattern parameters and toy-connection polling/events, and provides the
@@ -200,15 +197,19 @@ All commands target whichever toy (or "All Toys") is currently selected.
     and a second hand encodes vibration level (angle = level × 18°). The
     hand is muted whenever not vibrating (any level, including 0) and turns
     the active/pink color only while actively vibrating — to an observer
-    it's just a second hand at a plausible position.
+    it's just a second hand at a plausible position. Hour/minute hands have
+    rounded tips; the 6 o'clock quarter-tick is replaced by a small vector
+    glyph (`draw_pattern_glyph`) showing the current pattern.
   - **Digital** — digital `HH:MM:SS` time (real, live seconds, ticking
     continuously) with a day-of-week row, plus a chronograph-style sub-dial
     at 6 o'clock whose needle *always* encodes vibration level (angle =
     level⁄20 of a full turn — no idle-based behavior at all) and whose
     ring/needle color follows the same active/muted state rule as the
-    Analog hand. Below it, a Steady/Pulse/Wave register drawn as Roman
-    numerals (I/II/III) with a marker triangle on the selected pattern
-    reads as an ordinary chronograph totalizer.
+    Analog hand. Below it, a Steady/Pulse/Wave register drawn as the same
+    waveform glyphs (originally Roman numerals I/II/III, replaced in a
+    later design pass) with a marker triangle on the selected pattern reads
+    as an ordinary chronograph totalizer. Rect platforms only — Chalk and
+    Gabbro have no room for it.
 
   **Analog's** level hand reverts to showing **true elapsed seconds** (an
   ordinary running second hand) after the idle stand-down period with no
@@ -221,23 +222,29 @@ All commands target whichever toy (or "All Toys") is currently selected.
   disguise's "look ordinary at rest" job is already done; the sub-dial
   needle just always shows level, full stop.
 
-  The date row can be switched to show today's step count instead (a
-  settings-page toggle, `secondary_display`, default "Date") — but this
-  only takes effect on **Digital**; Analog always shows the date regardless
-  of the setting, since a walking-person glyph crowded next to the analog
-  clock face didn't read well visually. Steps are read via
+  The date row can be switched to show today's step count or current heart
+  rate instead (a settings-page radio group, `secondary_display`, default
+  "Date") — **Digital** always honors it; **Analog** does too on rectangular
+  platforms (there's room in the date aperture), but round Analog (Chalk/
+  Gabbro) always shows the date regardless of the setting, since a walking-
+  person/heart glyph crowded next to a small round clock face didn't read
+  well visually. Steps are read via
   `health_service_sum_today(HealthMetricStepCount)` (accelerometer-derived,
   works on every target platform, no dedicated pedometer needed) — not
   `health_service_peek_current_value()`, which the SDK docs explicitly
   call out as inapplicable to accumulator metrics like step count (always
   returns 0 for them); using the wrong one was a real bug caught via
-  real-hardware testing. The walking-person glyph to its left is a literal
-  Noto emoji character (U+1F6B6) embedded directly in the string —
-  confirmed rendering correctly on real Pebble Time 2 hardware, even
-  though it isn't an officially-documented third-party capability
-  (Pebble's public `FONT_KEY_*` system fonts don't list emoji, but the
-  text renderer evidently falls back to an emoji-capable font for
-  unmapped codepoints, the same way notification text does).
+  real-hardware testing. Heart rate is the opposite case: it's an
+  instantaneous metric, so `health_service_peek_current_value
+  (HealthMetricHeartRateBPM)` is the *correct* call there. Both show a
+  `no-perm`/`n/a` fallback (via `health_service_metric_accessible`) instead
+  of silently displaying 0 when the metric can't be read. The walking-person
+  (U+1F6B6) and heart (U+2764) glyphs are literal Noto emoji characters
+  embedded directly in the string — confirmed rendering correctly on real
+  Pebble Time 2 hardware, even though it isn't an officially-documented
+  third-party capability (Pebble's public `FONT_KEY_*` system fonts don't
+  list emoji, but the text renderer evidently falls back to an emoji-capable
+  font for unmapped codepoints, the same way notification text does).
 
   A "BT" label + a small status dot (muted when connected, red when lost)
   plus a battery percentage sit in a status row on both faces; the label
@@ -333,8 +340,10 @@ Once the socket confirms access, both of these fall silent automatically
 Hold SELECT cycles through All Toys plus every toy the phone currently knows
 about, sourced from the same data as the connection glyph (the Events API's
 `toy-list` when connected, `GetToys` as a fallback). Each toy's nickname
-(falling back to its model name) is what shows on the watch, truncated to 20
-characters.
+(falling back to its model name) is what shows on the watch, truncated to 9
+characters (`TOY_NAME_MAX_CHARS` in `index.js`) — empirically the longest
+that fits the Basic mode toy/battery row without clipping on Chalk's
+narrower screen, the tightest case across all target platforms.
 
 Under the hood, `index.js` keeps an ordered list (`All Toys` always first)
 and an index into it; outgoing `Function`/`Pattern` requests include a `toy`
@@ -492,7 +501,7 @@ SELECT). `reset_idle_timer()` no longer even arms the underlying timer while
 Basic is active, since nothing in Basic reacts to `s_idle` anymore - the
 whole mechanism is Discrete-only now.
 
-## Round display support (Chalk)
+## Round display support (Chalk, Gabbro)
 
 Chalk's round screen automatically clips anything drawn outside its
 physical circle, which changes how a couple of things need to be drawn:
@@ -513,10 +522,53 @@ physical circle, which changes how a couple of things need to be drawn:
   has much less usable width away from its vertical center than a rectangle
   does.
 
-All of this is behind `#if defined(PBL_ROUND)` and was never tested on
-actual round hardware (Rebble's current SDK doesn't include a Chalk unit
-this project has access to) - the emulator is the only thing this has run
-against. Real-hardware layout tuning may be needed.
+All of this is behind `#if defined(PBL_ROUND)` (true for both Chalk and
+Gabbro) and was never tested on actual round hardware - the emulator is the
+only thing this has run against. Real-hardware layout tuning may be needed.
+
+**Gabbro (Pebble Round 2)** is a second round platform, 260×260 versus
+Chalk's 180×180 — 44% larger, not just a scaled-up Chalk. Since a naive
+scale-up isn't necessarily the right visual answer, Gabbro gets its own
+hand-tuned constants (`#if defined(PBL_PLATFORM_GABBRO) / #elif
+defined(PBL_ROUND) [Chalk] / #else [rect]` three-way branches in
+`build_analog_face`, `analog_hands_update_proc`, `build_chrono_face`,
+`chrono_subdial_update_proc`), sized against Claude Design's own pixel
+values for a 260×260 canvas rather than derived from Chalk's numbers. The
+bezel inset is also wider on Gabbro (8px vs Chalk's 6px) — 6px read as a
+near-invisible hairline at the larger size.
+
+Gabbro is also one of two platforms (with Emery) that has a real capacitive
+touchscreen — see "Gesture control" below.
+
+## Gesture control (Emery, Gabbro)
+
+A settings-page radio group (`touchPlayMode` in `index.js` /
+`s_touch_mode`/`TOUCH_MODE_*` in `main.c`, persisted as an int) lets you
+choose how the watch responds to a knock or touch, for the two platforms
+that have either an accelerometer worth using this way or a real
+touchscreen:
+
+- **Accelerometer** (default) — `accel_tap_service_subscribe`, the SDK's
+  knock/shake detector. Requires **two knocks within 400ms** to toggle play/
+  pause, not one — a single knock (including an accidental shake of the
+  watch) only arms a window for a matching second knock; it doesn't act by
+  itself. An earlier single-knock version turned out to trigger from
+  ordinary wrist movement, which is why this needs to be deliberate.
+- **Touchscreen** — the real capacitive touch sensor
+  (`touch_service_subscribe`), not the accelerometer. There's no long-press
+  recognizer in the SDK (only tap/pan/swipe), so both gestures are built
+  from the raw `Touchdown`/`PositionUpdate`/`Liftoff` event stream:
+  - A quick **double-tap** anywhere on the screen toggles play/pause (same
+    400ms-window double-action logic as the accelerometer mode).
+  - A **long-press** (600ms) changes pattern. On the Digital face's rect-
+    only pattern register, all three glyphs are visible at once, so a
+    long-press picks whichever one you pressed directly
+    (`pattern_register_col_x` hit-testing, shared with the draw code so the
+    two can't drift apart). Everywhere else only one glyph is ever shown at
+    a time (Analog's 6 o'clock glyph, or Gabbro's round Digital face, which
+    has no register at all), so a long-press there just cycles to the next
+    pattern instead.
+- **Off** — buttons only, no accelerometer or touch handling at all.
 
 ## Edge-to-edge bezel and layout corrections (rectangular platforms)
 
@@ -699,4 +751,5 @@ Other ideas:
 - Persist the selected pattern and toy with `persist_write_int`/a small
   on-watch string buffer, the same way `ui_style` and the colors are, if you
   want them to survive app restarts.
-- Real hardware testing and layout tuning for the Chalk (round) variant.
+- Real hardware testing and layout tuning for the Chalk and Gabbro (round)
+  variants.
