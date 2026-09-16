@@ -857,19 +857,42 @@ static void update_time_display(struct tm *tick_time) {
 
   static char date_buf[24];
   if (show_steps) {
-    // health_service_peek_current_value() is explicitly documented as NOT
-    // applicable to accumulator metrics like HealthMetricStepCount (always
-    // returns 0 for them) - that was the real-hardware bug. sum_today() is
-    // the correct call for "today's step count so far".
-    HealthValue steps = health_service_sum_today(HealthMetricStepCount);
-    // TEMPORARY re-test: re-add the literal Noto emoji (U+1F6B6) ahead of a
-    // now-correct, non-zero step count, to rule out the previous hardware
-    // test's "0" (a symptom of the health API bug, fixed above) being why
-    // nothing rendered, rather than the emoji itself being unsupported.
-    // The vector icon layer is left un-built below (build_secondary_icon
-    // call removed for this test) so there's no double icon. Revert to
-    // the vector glyph if this still doesn't render on real hardware.
-    snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
+    // Diagnostic: distinguish "genuinely zero steps" from "can't read
+    // steps at all" (no permission granted, unsupported, or no samples
+    // yet) instead of silently showing 0 for all of these - a real
+    // hardware test showed 0 even after fixing the sum_today() bug below,
+    // and this is the only way to tell which case it actually is.
+    time_t now = time(NULL);
+    struct tm *today_tm = localtime(&now);
+    struct tm start_tm = *today_tm;
+    start_tm.tm_hour = 0;
+    start_tm.tm_min = 0;
+    start_tm.tm_sec = 0;
+    time_t start_of_today = mktime(&start_tm);
+    HealthServiceAccessibilityMask access =
+        health_service_metric_accessible(HealthMetricStepCount, start_of_today, now);
+    if (access & HealthServiceAccessibilityMaskNoPermission) {
+      snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 no-perm");
+    } else if (access & HealthServiceAccessibilityMaskNotSupported) {
+      snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 n/a");
+    } else {
+      // health_service_peek_current_value() is explicitly documented as
+      // NOT applicable to accumulator metrics like HealthMetricStepCount
+      // (always returns 0 for them) - that was the original real-hardware
+      // bug. sum_today() is the correct call for "today's step count so
+      // far". A genuine 0 here (access has neither flag above set) means
+      // permission is granted and the metric is supported, but no steps
+      // have been recorded yet today.
+      HealthValue steps = health_service_sum_today(HealthMetricStepCount);
+      // TEMPORARY re-test: literal Noto emoji (U+1F6B6) ahead of the count,
+      // to rule out the previous test's "0" (a symptom of the health API
+      // bug, fixed here) being why nothing rendered, rather than the emoji
+      // itself being unsupported. The vector icon layer is left un-built
+      // below (build_secondary_icon call removed for this test) so
+      // there's no double icon. Revert to the vector glyph if this still
+      // doesn't render on real hardware.
+      snprintf(date_buf, sizeof(date_buf), "\xF0\x9F\x9A\xB6 %d", (int)steps);
+    }
   } else if (s_discrete_face == DISCRETE_FACE_ANALOG) {
     strftime(date_buf, sizeof(date_buf), "%a %d", tick_time);
   } else {
