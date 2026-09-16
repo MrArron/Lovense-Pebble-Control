@@ -549,8 +549,9 @@ function sendSecondaryDisplayToWatch(mode) {
   });
 }
 
-function sendTouchPlayModeToWatch(enabled) {
-  queueAppMessage({ touch_play_mode: enabled ? 1 : 0 }, function () {
+function sendTouchPlayModeToWatch(mode) {
+  var value = mode === 'touchscreen' ? 1 : (mode === 'off' ? 2 : 0);
+  queueAppMessage({ touch_play_mode: value }, function () {
     // delivered
   }, function () {
     console.log('Failed to send touch play mode to watch.');
@@ -608,7 +609,7 @@ Pebble.addEventListener('ready', function () {
   sendUiStyleToWatch(getSetting('lovenseUiStyle', 'basic'));
   sendDiscreteFaceToWatch(getSetting('discreteFace', 'analog'));
   sendSecondaryDisplayToWatch(getSetting('secondaryDisplay', 'date'));
-  sendTouchPlayModeToWatch(getSetting('touchPlayMode', 'false') === 'true');
+  sendTouchPlayModeToWatch(getSetting('touchPlayMode', 'accel'));
   sendBasicColorsToWatch();
   sendDiscreteColorsToWatch();
   sendDiscreteActiveColorToWatch();
@@ -677,8 +678,10 @@ Pebble.addEventListener('showConfiguration', function () {
   var secondaryStepsChecked = secondaryDisplay === 'steps' ? 'checked' : '';
   var secondaryHeartrateChecked = secondaryDisplay === 'heartrate' ? 'checked' : '';
 
-  var touchPlayMode = getSetting('touchPlayMode', 'false') === 'true';
-  var touchPlayChecked = touchPlayMode ? 'checked' : '';
+  var touchPlayMode = getSetting('touchPlayMode', 'accel');
+  var touchAccelChecked = touchPlayMode === 'accel' ? 'checked' : '';
+  var touchScreenChecked = touchPlayMode === 'touchscreen' ? 'checked' : '';
+  var touchOffChecked = touchPlayMode === 'off' ? 'checked' : '';
 
   // Basic's fields are the single source of truth for the unified Custom-tab
   // swatches (see swatchRow() below) - Discrete's own basic_bg_color etc.
@@ -863,10 +866,14 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div class="radio-row"><input type="radio" name="discreteFace" id="face-chrono" value="chrono" ' + faceChronoChecked + '>' +
     '<label for="face-chrono" style="display:inline;margin:0">Digital — digital time with a chrono sub-dial</label></div>' +
 
-    '<label style="margin-top:20px">Touch play mode</label>' +
-    '<p class="hint">Emery &amp; Gabbro only, Digital face. Tap the watch face to pause/resume.</p>' +
-    '<div class="radio-row"><input type="checkbox" id="touchPlayMode" ' + touchPlayChecked + '>' +
-    '<label for="touchPlayMode" style="display:inline;margin:0">Enable tap to pause/resume</label></div>' +
+    '<label style="margin-top:20px">Gesture control</label>' +
+    '<p class="hint">Emery &amp; Gabbro only. Pause/resume without pressing a button.</p>' +
+    '<div class="radio-row"><input type="radio" name="touchPlayMode" id="touch-accel" value="accel" ' + touchAccelChecked + '>' +
+    '<label for="touch-accel" style="display:inline;margin:0">Double-knock the watch — accelerometer, no touchscreen needed</label></div>' +
+    '<div class="radio-row"><input type="radio" name="touchPlayMode" id="touch-screen" value="touchscreen" ' + touchScreenChecked + '>' +
+    '<label for="touch-screen" style="display:inline;margin:0">Touchscreen — double-tap anywhere to pause/resume, long-press a pattern icon to change pattern</label></div>' +
+    '<div class="radio-row"><input type="radio" name="touchPlayMode" id="touch-off" value="off" ' + touchOffChecked + '>' +
+    '<label for="touch-off" style="display:inline;margin:0">Off — side buttons only</label></div>' +
 
     '<label style="margin-top:20px">Secondary display</label>' +
     '<p class="hint">Digital face always; Analog face on rectangular watches only (round has no room).</p>' +
@@ -1200,7 +1207,8 @@ Pebble.addEventListener('showConfiguration', function () {
     'batterySource=batterySource?batterySource.value:"watch";' +
     'var secondaryDisplay=document.querySelector(\'input[name="secondaryDisplay"]:checked\');' +
     'secondaryDisplay=secondaryDisplay?secondaryDisplay.value:"date";' +
-    'var touchPlayMode=document.getElementById("touchPlayMode").checked;' +
+    'var touchPlayMode=document.querySelector(\'input[name="touchPlayMode"]:checked\');' +
+    'touchPlayMode=touchPlayMode?touchPlayMode.value:"accel";' +
     'var result={' +
     'lovenseHost:host,' +
     'lovensePort:port,' +

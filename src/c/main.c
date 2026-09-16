@@ -32,6 +32,12 @@
 #define SECONDARY_DISPLAY_STEPS 1
 #define SECONDARY_DISPLAY_HR 2
 
+// Emery/Gabbro only - how a tap/knock toggles play/pause (see TOUCH_MODE_*
+// state and apply_touch_mode()).
+#define TOUCH_MODE_ACCEL 0
+#define TOUCH_MODE_TOUCHSCREEN 1
+#define TOUCH_MODE_OFF 2
+
 #define BT_STATE_CONNECTING 0
 #define BT_STATE_CONNECTED 1
 #define BT_STATE_DISCONNECTED 2
@@ -48,7 +54,7 @@
 #define PERSIST_KEY_DISCRETE_FACE 9
 #define PERSIST_KEY_BATTERY_SOURCE 10
 #define PERSIST_KEY_SECONDARY_DISPLAY 11
-#define PERSIST_KEY_TOUCH_PLAY 12
+#define PERSIST_KEY_TOUCH_MODE 12
 
 #define TIP_DEFAULT_TEXT "Hold UP/DOWN: pattern\nHold SELECT: toy"
 
@@ -132,8 +138,25 @@ static char s_toy_name[24] = "All Toys";
 static int s_battery_source = BATTERY_SOURCE_WATCH;
 static int s_secondary_display = SECONDARY_DISPLAY_DATE;
 static int s_toy_battery = -1; // 0-100, or -1 = unknown (not persisted - meaningless until resent)
-static bool s_touch_play = false; // Emery/Gabbro only - tap the Digital face to pause/resume
-static AppTimer *s_touch_play_lock_timer = NULL; // 150ms debounce after a tap acts
+static int s_touch_mode = TOUCH_MODE_ACCEL; // Emery/Gabbro only - see TOUCH_MODE_*
+
+// Accelerometer mode: two knocks within ACCEL_DOUBLE_TAP_WINDOW_MS toggle
+// play/pause. A single knock just arms the window - shaking the watch
+// doesn't reliably produce a matched pair, unlike a deliberate double-knock.
+static AppTimer *s_accel_tap_window_timer = NULL;
+#define ACCEL_DOUBLE_TAP_WINDOW_MS 400
+
+// Touchscreen mode: raw touch_service state for building tap/double-tap/
+// long-press gestures ourselves (the SDK's tap_recognizer only recognizes a
+// single tap, and there's no long-press recognizer at all).
+static GPoint s_touch_down_point;
+static bool s_touch_moved;
+static bool s_touch_long_press_fired;
+static AppTimer *s_touch_long_press_timer = NULL;
+static AppTimer *s_touch_tap_window_timer = NULL;
+#define TOUCH_LONG_PRESS_MS 600
+#define TOUCH_DOUBLE_TAP_WINDOW_MS 400
+#define TOUCH_MOVE_THRESHOLD_PX 15
 
 // Idle behavior is Discrete-only now (the level hand/needle reverting to
 // real seconds while idle) - Basic mode no longer reacts to s_idle at all,
@@ -150,7 +173,6 @@ static GColor s_discrete_bezel_color;  // "bg" role in the design spec - bezel/o
 static GColor s_discrete_bg_color;     // "face" role in the design spec - dial/card background
 static GColor s_discrete_text_color;
 static GColor s_discrete_muted_color;  // computed - blend(face, text), for secondary elements
-static GColor s_discrete_aperture_color; // computed - blend(bezel, black), Analog's recessed date window
 static GColor s_discrete_active_color; // vibrating-state signal color, default Lovense pink, independent of presets
 
 static const char *WEEKDAY_LETTERS[7] = { "S", "M", "T", "W", "T", "F", "S" };
@@ -159,6 +181,9 @@ static void update_discrete_display(void);
 static void update_basic_display(void);
 static void update_basic_toy_row(void);
 static void click_config_provider(void *context);
+static void select_pattern(int pattern);
+static void cycle_pattern(int direction);
+static void apply_touch_mode(void);
 
 static void log_heap(const char *label) {
   APP_LOG(APP_LOG_LEVEL_INFO, "[heap] %s: free=%d used=%d",
@@ -238,16 +263,6 @@ static GColor blend_colors(GColor a, GColor b) {
 
 static void recompute_discrete_muted(void) {
   s_discrete_muted_color = blend_colors(s_discrete_bg_color, s_discrete_text_color);
-}
-
-// A darker shade of whatever bezel color is currently chosen, so the
-// Analog face's date aperture reads as a "recessed window" against any
-// preset - a flat hardcoded black would look like a rendering glitch
-// against the app's many light-background presets. On 1-bit displays
-// blend_colors() already falls back to a dithered GColorDarkGray, so this
-// stays visible there too without any extra handling.
-static void recompute_discrete_aperture(void) {
-  s_discrete_aperture_color = blend_colors(s_discrete_bezel_color, GColorBlack);
 }
 
 static void recompute_basic_pattern_color(void) {
@@ -507,7 +522,11 @@ static void analog_hands_update_proc(Layer *layer, GContext *ctx) {
   // That's the one quarter tick replaced with the pattern glyph below.
   for (int q = 0; q < 4; q++) {
     if (q == 2) {
-      GPoint glyph_mid = { center.x, (int16_t)(center.y + tick_radius - quarter_len / 2) };
+      // Shifted up a few px from the tick's own radial position - centering
+      // exactly on it put the glyph's lowest stroke pixels right on the
+      // hands_layer's own clipping edge (bottom-cut on real hardware).
+      int16_t clip_margin = 3;
+      GPoint glyph_mid = { center.x, (int16_t)(center.y + tick_radius - quarter_len / 2 - clip_margin) };
       int16_t glyph_w = (int16_t)(quarter_len * 2);
       int16_t glyph_h = quarter_len;
       GRect glyph_frame = GRect((int16_t)(glyph_mid.x - glyph_w / 2), (int16_t)(glyph_mid.y - glyph_h / 2),
@@ -631,6 +650,15 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_circle(ctx, center, cap_radius);
 }
 
+// Shared between drawing and touch hit-testing (handle_pattern_long_press)
+// so the two can never drift apart - "the column you can press" and "the
+// column that's drawn there" are computed by the same formula.
+static int16_t pattern_register_col_x(int16_t bounds_w, int16_t col_w, int index) {
+  return (index == 0) ? 0
+       : (index == PATTERN_COUNT - 1) ? (int16_t)(bounds_w - col_w)
+       : (int16_t)((bounds_w - col_w) / 2);
+}
+
 static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   // Three columns (Steady/Pulse/Wave as I/II/III), space-between, reading
   // as a chrono totalizer. Only the currently selected pattern gets a
@@ -650,9 +678,7 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   for (int i = 0; i < PATTERN_COUNT; i++) {
     bool selected = any_selected && (i == s_pattern);
     GColor color = selected ? s_discrete_text_color : s_discrete_muted_color;
-    int16_t col_x = (i == 0) ? 0
-                   : (i == PATTERN_COUNT - 1) ? (bounds.size.w - col_w)
-                   : (bounds.size.w - col_w) / 2;
+    int16_t col_x = pattern_register_col_x(bounds.size.w, col_w, i);
     int16_t y = 0;
 
     if (selected) {
@@ -839,7 +865,6 @@ static void apply_basic_colors(void) {
 
 static void apply_discrete_colors(void) {
   recompute_discrete_muted();
-  recompute_discrete_aperture();
   if (s_ui_style == UI_STYLE_DISCRETE) {
     window_set_background_color(s_window, s_discrete_bg_color);
   }
@@ -864,9 +889,6 @@ static void apply_discrete_colors(void) {
   }
   if (s_date_layer) {
     text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
-    if (s_discrete_face == DISCRETE_FACE_ANALOG) {
-      text_layer_set_background_color(s_date_layer, s_discrete_aperture_color);
-    }
   }
   if (s_time_layer) {
     text_layer_set_text_color(s_time_layer, s_discrete_text_color);
@@ -1144,38 +1166,12 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
   }
 }
 
-#if defined(PBL_TOUCH)
-static void touch_play_lock_expire(void *data) {
-  s_touch_play_lock_timer = NULL;
-}
-
-static void tap_handler(AccelAxisType axis, int32_t direction) {
-  // Debounced: act immediately on the first tap, then ignore any further
-  // taps for 150ms - a single real-world tap/knock can register as more
-  // than one accelerometer event, and this app's buttons already act
-  // instantly, so "ignore repeats for a bit" (not "wait, then act") matches
-  // the rest of its zero-latency feel.
-  if (!s_touch_play || s_touch_play_lock_timer) {
-    return;
-  }
-  // Digital face only, per the design spec - Analog's disguise relies on
-  // the whole face reading as an ordinary watch, and touch isn't part of
-  // that face's story.
-  if (s_ui_style != UI_STYLE_DISCRETE || s_discrete_face != DISCRETE_FACE_CHRONO) {
-    return;
+static void select_pattern(int pattern) {
+  if (pattern == s_pattern) {
+    return; // already selected - no redundant haptic/resend
   }
   reset_idle_timer();
-  s_active = !s_active;
-  update_display();
-  vibes_short_pulse();
-  send_command_msg(s_active ? "vibrate" : "pause", s_intensity);
-  s_touch_play_lock_timer = app_timer_register(150, touch_play_lock_expire, NULL);
-}
-#endif
-
-static void cycle_pattern(int direction) {
-  reset_idle_timer();
-  s_pattern = (s_pattern + direction + PATTERN_COUNT) % PATTERN_COUNT;
+  s_pattern = pattern;
   vibes_enqueue_custom_pattern(HAPTIC_PATTERNS[s_pattern]);
   update_display();
   // If we're actively vibrating, restart the toy on the newly selected
@@ -1187,6 +1183,154 @@ static void cycle_pattern(int direction) {
     send_command_msg("ping", s_intensity);
   }
 }
+
+static void cycle_pattern(int direction) {
+  select_pattern((s_pattern + direction + PATTERN_COUNT) % PATTERN_COUNT);
+}
+
+#if defined(PBL_TOUCH)
+static void gesture_toggle_play_pause(void) {
+  reset_idle_timer();
+  s_active = !s_active;
+  update_display();
+  vibes_short_pulse();
+  send_command_msg(s_active ? "vibrate" : "pause", s_intensity);
+}
+
+// --- Accelerometer mode (default): two knocks toggle play/pause ---
+
+static void accel_tap_window_expire(void *data) {
+  s_accel_tap_window_timer = NULL; // only one knock arrived - not a double-knock
+}
+
+static void tap_handler(AccelAxisType axis, int32_t direction) {
+  // Digital face only, per the design spec - Analog's disguise relies on
+  // the whole face reading as an ordinary watch.
+  if (s_ui_style != UI_STYLE_DISCRETE || s_discrete_face != DISCRETE_FACE_CHRONO) {
+    return;
+  }
+  if (s_accel_tap_window_timer) {
+    // Second knock within the window - confirmed double-knock. A single
+    // knock alone (e.g. from shaking the watch) never gets this far, since
+    // the first knock only arms the window rather than acting immediately.
+    app_timer_cancel(s_accel_tap_window_timer);
+    s_accel_tap_window_timer = NULL;
+    gesture_toggle_play_pause();
+  } else {
+    s_accel_tap_window_timer = app_timer_register(ACCEL_DOUBLE_TAP_WINDOW_MS,
+                                                   accel_tap_window_expire, NULL);
+  }
+}
+
+// --- Touchscreen mode: the real capacitive touch sensor, not the
+// accelerometer. There's no built-in long-press recognizer in the SDK (only
+// tap/pan/swipe), so both gestures below are built from the raw
+// touch_service event stream ourselves. ---
+
+// A long press directly on the pattern register picks that specific pattern
+// - all three are visible at once there, so "press the one you want" makes
+// sense. Everywhere else only one glyph is ever shown at a time (Analog's
+// 6 o'clock tick, or Gabbro's round Digital face, which has no register at
+// all), so a long press there just cycles to the next pattern instead.
+static void handle_pattern_long_press(GPoint point) {
+  if (s_ui_style != UI_STYLE_DISCRETE) {
+    return;
+  }
+#if !defined(PBL_ROUND)
+  if (s_discrete_face == DISCRETE_FACE_CHRONO && s_register_layer) {
+    GRect register_frame = layer_get_frame(s_register_layer);
+    int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+    int16_t col_w = emery_px(26, k);
+    for (int i = 0; i < PATTERN_COUNT; i++) {
+      int16_t col_x = pattern_register_col_x(register_frame.size.w, col_w, i);
+      GRect col_rect = GRect((int16_t)(register_frame.origin.x + col_x), register_frame.origin.y,
+                              col_w, register_frame.size.h);
+      if (grect_contains_point(&col_rect, &point)) {
+        select_pattern(i);
+        return;
+      }
+    }
+    return; // missed every column - no-op rather than guessing which one
+  }
+#endif
+  cycle_pattern(1);
+}
+
+static void touch_long_press_fire(void *data) {
+  s_touch_long_press_timer = NULL;
+  s_touch_long_press_fired = true;
+  handle_pattern_long_press(s_touch_down_point);
+}
+
+static void touch_tap_window_expire(void *data) {
+  s_touch_tap_window_timer = NULL; // only one quick tap arrived - not a double-tap
+}
+
+static void touch_handler(const TouchEvent *event, void *context) {
+  switch (event->type) {
+    case TouchEvent_Touchdown:
+      s_touch_down_point = GPoint(event->x, event->y);
+      s_touch_moved = false;
+      s_touch_long_press_fired = false;
+      if (s_touch_long_press_timer) {
+        app_timer_cancel(s_touch_long_press_timer);
+      }
+      s_touch_long_press_timer = app_timer_register(TOUCH_LONG_PRESS_MS, touch_long_press_fire, NULL);
+      break;
+
+    case TouchEvent_PositionUpdate: {
+      if (s_touch_moved) {
+        break;
+      }
+      int16_t dx = (int16_t)(event->x - s_touch_down_point.x);
+      int16_t dy = (int16_t)(event->y - s_touch_down_point.y);
+      bool moved = dx > TOUCH_MOVE_THRESHOLD_PX || dx < -TOUCH_MOVE_THRESHOLD_PX
+                 || dy > TOUCH_MOVE_THRESHOLD_PX || dy < -TOUCH_MOVE_THRESHOLD_PX;
+      if (moved) {
+        s_touch_moved = true;
+        if (s_touch_long_press_timer) {
+          app_timer_cancel(s_touch_long_press_timer);
+          s_touch_long_press_timer = NULL;
+        }
+      }
+      break;
+    }
+
+    case TouchEvent_Liftoff:
+      if (s_touch_long_press_timer) {
+        app_timer_cancel(s_touch_long_press_timer);
+        s_touch_long_press_timer = NULL;
+      }
+      if (s_touch_long_press_fired || s_touch_moved) {
+        break; // already handled as a long press, or this was a drag
+      }
+      if (s_touch_tap_window_timer) {
+        // Second quick tap within the window - confirmed double-tap.
+        app_timer_cancel(s_touch_tap_window_timer);
+        s_touch_tap_window_timer = NULL;
+        gesture_toggle_play_pause();
+      } else {
+        s_touch_tap_window_timer = app_timer_register(TOUCH_DOUBLE_TAP_WINDOW_MS,
+                                                       touch_tap_window_expire, NULL);
+      }
+      break;
+  }
+}
+
+static void apply_touch_mode(void) {
+  accel_tap_service_unsubscribe();
+  touch_service_unsubscribe();
+  if (s_touch_mode == TOUCH_MODE_ACCEL) {
+    accel_tap_service_subscribe(tap_handler);
+  } else if (s_touch_mode == TOUCH_MODE_TOUCHSCREEN) {
+    touch_service_subscribe(touch_handler, NULL);
+  }
+  // TOUCH_MODE_OFF: leave both unsubscribed - buttons only.
+}
+#else
+static void apply_touch_mode(void) {
+}
+#endif // PBL_TOUCH
 
 static void up_long_click_handler(ClickRecognizerRef recognizer, void *context) {
   cycle_pattern(1);
@@ -1356,10 +1500,7 @@ static void build_analog_face(GRect bounds) {
   layer_add_child(s_discrete_container, s_hands_layer);
 
   s_date_layer = text_layer_create(date_frame);
-  // Filled (not clear) background - reads as a recessed date window the
-  // hands sweep behind rather than over. Derived from the bezel color so it
-  // looks intentional against any preset instead of a flat hardcoded black.
-  text_layer_set_background_color(s_date_layer, s_discrete_aperture_color);
+  text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, s_discrete_muted_color);
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
@@ -1594,10 +1735,11 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     refresh_discrete_time();
   }
 
-  Tuple *touch_play_tuple = dict_find(iterator, MESSAGE_KEY_touch_play_mode);
-  if (touch_play_tuple) {
-    s_touch_play = (touch_play_tuple->value->int32 != 0);
-    persist_write_int(PERSIST_KEY_TOUCH_PLAY, s_touch_play ? 1 : 0);
+  Tuple *touch_mode_tuple = dict_find(iterator, MESSAGE_KEY_touch_play_mode);
+  if (touch_mode_tuple) {
+    s_touch_mode = (int)touch_mode_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_TOUCH_MODE, s_touch_mode);
+    apply_touch_mode();
   }
 
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
@@ -1664,20 +1806,21 @@ static void inbox_dropped_callback(AppMessageResult reason, void *context) {
 static void window_load(Window *window) {
   log_heap("window_load start");
   switch_ui_style(); // builds whichever style s_ui_style currently indicates
-#if defined(PBL_TOUCH)
-  // Subscribed for the window's whole lifetime, regardless of the current
-  // value of s_touch_play/s_ui_style/s_discrete_face - all of those can
-  // change at runtime via AppMessage without a window reload, so
-  // tap_handler checks them itself on every tap rather than this needing to
-  // resubscribe whenever a setting changes.
-  accel_tap_service_subscribe(tap_handler);
-#endif
+  // A no-op on non-touch platforms. Subscribes for the window's whole
+  // lifetime regardless of the current s_touch_mode/s_ui_style/
+  // s_discrete_face - those can all change at runtime via AppMessage
+  // without a window reload, so the handlers check them on every event
+  // rather than this needing to resubscribe on every settings change; it's
+  // only called again from inbox_received_callback when s_touch_mode itself
+  // changes, to switch which service is actually subscribed.
+  apply_touch_mode();
   log_heap("window_load end");
 }
 
 static void window_unload(Window *window) {
 #if defined(PBL_TOUCH)
   accel_tap_service_unsubscribe();
+  touch_service_unsubscribe();
 #endif
   teardown_basic_ui();
   teardown_discrete_ui();
@@ -1725,13 +1868,12 @@ static void init(void) {
   s_secondary_display = persist_exists(PERSIST_KEY_SECONDARY_DISPLAY)
     ? persist_read_int(PERSIST_KEY_SECONDARY_DISPLAY)
     : SECONDARY_DISPLAY_DATE;
-  s_touch_play = persist_exists(PERSIST_KEY_TOUCH_PLAY)
-    ? (persist_read_int(PERSIST_KEY_TOUCH_PLAY) != 0)
-    : false;
+  s_touch_mode = persist_exists(PERSIST_KEY_TOUCH_MODE)
+    ? persist_read_int(PERSIST_KEY_TOUCH_MODE)
+    : TOUCH_MODE_ACCEL;
 
   recompute_basic_pattern_color();
   recompute_discrete_muted();
-  recompute_discrete_aperture();
 
   s_window = window_create();
   window_set_window_handlers(s_window, (WindowHandlers) {
