@@ -40,7 +40,8 @@
       "battery_source",
       "toy_battery",
       "secondary_display",
-      "touch_play_mode"
+      "touch_play_mode",
+      "auto_timeout_minutes"
     ],
     "resources": {
       "media": [

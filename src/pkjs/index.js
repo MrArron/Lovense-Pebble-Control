@@ -570,6 +570,14 @@ function sendTouchPlayModeToWatch(mode) {
   });
 }
 
+function sendAutoTimeoutMinutesToWatch(minutes) {
+  queueAppMessage({ auto_timeout_minutes: parseInt(minutes, 10) }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send auto-timeout minutes to watch.');
+  });
+}
+
 function sendBatterySourceToWatch(source) {
   queueAppMessage({ battery_source: source === 'toy' ? 1 : 0 }, function () {
     // delivered
@@ -622,6 +630,7 @@ Pebble.addEventListener('ready', function () {
   sendDiscreteFaceToWatch(getSetting('discreteFace', 'analog'));
   sendSecondaryDisplayToWatch(getSetting('secondaryDisplay', 'date'));
   sendTouchPlayModeToWatch(getSetting('touchPlayMode', 'accel'));
+  sendAutoTimeoutMinutesToWatch(getSetting('autoTimeoutMinutes', '3'));
   sendBasicColorsToWatch();
   sendDiscreteColorsToWatch();
   sendDiscreteActiveColorToWatch();
@@ -695,6 +704,14 @@ Pebble.addEventListener('showConfiguration', function () {
   var touchScreenChecked = touchPlayMode === 'touchscreen' ? 'checked' : '';
   var touchOffChecked = touchPlayMode === 'off' ? 'checked' : '';
 
+  var autoTimeoutMinutes = getEnumSetting('autoTimeoutMinutes', ['0', '1', '3', '5', '10', '15'], '3');
+  var timeoutOffChecked = autoTimeoutMinutes === '0' ? 'checked' : '';
+  var timeout1Checked = autoTimeoutMinutes === '1' ? 'checked' : '';
+  var timeout3Checked = autoTimeoutMinutes === '3' ? 'checked' : '';
+  var timeout5Checked = autoTimeoutMinutes === '5' ? 'checked' : '';
+  var timeout10Checked = autoTimeoutMinutes === '10' ? 'checked' : '';
+  var timeout15Checked = autoTimeoutMinutes === '15' ? 'checked' : '';
+
   // Basic's fields are the single source of truth for the unified Custom-tab
   // swatches (see swatchRow() below) - Discrete's own basic_bg_color etc.
   // are still sent/persisted separately on the wire, just always kept equal
@@ -716,17 +733,17 @@ Pebble.addEventListener('showConfiguration', function () {
   // never touch (see the design handoff's color-role table).
   var PRESETS = [
     { name: 'Lovense pink', bezel: '#ff2d89', bg: '#ffffff', text: '#000000' },
-    { name: 'Classic', bezel: '#7a1f1f', bg: '#f5e9a8', text: '#000000' },
-    { name: 'Midnight', bezel: '#16324f', bg: '#e8eef5', text: '#132a44' },
+    { name: 'Classic', bezel: '#7a1f1f', bg: '#f8f3d0', text: '#000000' },
+    { name: 'Midnight', bezel: '#16324f', bg: '#e8eef5', text: '#071626' },
     { name: 'Forest', bezel: '#1f4d3a', bg: '#0f1f18', text: '#7be8b0' },
     { name: 'Plum', bezel: '#4a1942', bg: '#111111', text: '#ffffff' },
     { name: 'Teal', bezel: '#0f4a4a', bg: '#ffffff', text: '#000000' },
-    { name: 'Rust', bezel: '#7a3010', bg: '#f5ecd8', text: '#333333' },
-    { name: 'Amber', bezel: '#8a5a12', bg: '#fff8e6', text: '#5a3d0a' },
-    { name: 'Slate', bezel: '#3d4a52', bg: '#e8edf0', text: '#1f2a30' },
-    { name: 'Crimson', bezel: '#c41e3a', bg: '#fff0f0', text: '#6b0f1a' },
-    { name: 'Violet', bezel: '#6d4aa0', bg: '#f3edfa', text: '#3a2560' },
-    { name: 'Ocean', bezel: '#1a6fa0', bg: '#e6f4fa', text: '#0a3a52' },
+    { name: 'Rust', bezel: '#7a3010', bg: '#f8f0e0', text: '#111111' },
+    { name: 'Amber', bezel: '#8a5a12', bg: '#fff8e6', text: '#1a0f03' },
+    { name: 'Slate', bezel: '#3d4a52', bg: '#edf2f5', text: '#0a1318' },
+    { name: 'Crimson', bezel: '#c41e3a', bg: '#fff0f0', text: '#200008' },
+    { name: 'Violet', bezel: '#6d4aa0', bg: '#f3edfa', text: '#100520' },
+    { name: 'Ocean', bezel: '#1a6fa0', bg: '#e6f4fa', text: '#031520' },
     { name: 'Steel', bezel: '#555555', bg: '#ffffff', text: '#000000' },
     { name: 'Ink', bezel: '#0055aa', bg: '#000000', text: '#ffffff' },
     { name: 'Sand', bezel: '#aa5500', bg: '#ffffaa', text: '#550000' }
@@ -887,6 +904,21 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div class="radio-row"><input type="radio" name="touchPlayMode" id="touch-off" value="off" ' + touchOffChecked + '>' +
     '<label for="touch-off" style="display:inline;margin:0">Off — side buttons only</label></div>' +
 
+    '<label style="margin-top:20px">Safety auto-pause</label>' +
+    '<p class="hint">Automatically pauses the toy after continuous use, for safety and to save battery. Your watch buzzes in short bursts for the last 15 seconds before it happens - any button press or touch on the watch resets the timer.</p>' +
+    '<div class="radio-row"><input type="radio" name="autoTimeoutMinutes" id="timeout-0" value="0" ' + timeoutOffChecked + '>' +
+    '<label for="timeout-0" style="display:inline;margin:0">Off</label></div>' +
+    '<div class="radio-row"><input type="radio" name="autoTimeoutMinutes" id="timeout-1" value="1" ' + timeout1Checked + '>' +
+    '<label for="timeout-1" style="display:inline;margin:0">1 minute</label></div>' +
+    '<div class="radio-row"><input type="radio" name="autoTimeoutMinutes" id="timeout-3" value="3" ' + timeout3Checked + '>' +
+    '<label for="timeout-3" style="display:inline;margin:0">3 minutes</label></div>' +
+    '<div class="radio-row"><input type="radio" name="autoTimeoutMinutes" id="timeout-5" value="5" ' + timeout5Checked + '>' +
+    '<label for="timeout-5" style="display:inline;margin:0">5 minutes</label></div>' +
+    '<div class="radio-row"><input type="radio" name="autoTimeoutMinutes" id="timeout-10" value="10" ' + timeout10Checked + '>' +
+    '<label for="timeout-10" style="display:inline;margin:0">10 minutes</label></div>' +
+    '<div class="radio-row"><input type="radio" name="autoTimeoutMinutes" id="timeout-15" value="15" ' + timeout15Checked + '>' +
+    '<label for="timeout-15" style="display:inline;margin:0">15 minutes</label></div>' +
+
     '<label style="margin-top:20px">Secondary display</label>' +
     '<p class="hint">Digital face always; Analog face on rectangular watches only (round has no room).</p>' +
     '<div class="radio-row"><input type="radio" name="secondaryDisplay" id="secondary-date" value="date" ' + secondaryDateChecked + '>' +
@@ -1004,7 +1036,7 @@ Pebble.addEventListener('showConfiguration', function () {
     '}' +
     'function getMuted(bg,text){' +
     'var ws=[0.5,0.3,0.15];' +
-    'for(var i=0;i<ws.length;i++){var m=blendHexW(bg,text,ws[i]);if(contrast(m,bg)>=2.5)return m;}' +
+    'for(var i=0;i<ws.length;i++){var m=blendHexW(bg,text,ws[i]);if(contrast(m,bg)>=3.0)return m;}' +
     'return text;' +
     '}' +
 
@@ -1221,6 +1253,8 @@ Pebble.addEventListener('showConfiguration', function () {
     'secondaryDisplay=secondaryDisplay?secondaryDisplay.value:"date";' +
     'var touchPlayMode=document.querySelector(\'input[name="touchPlayMode"]:checked\');' +
     'touchPlayMode=touchPlayMode?touchPlayMode.value:"accel";' +
+    'var autoTimeoutMinutes=document.querySelector(\'input[name="autoTimeoutMinutes"]:checked\');' +
+    'autoTimeoutMinutes=autoTimeoutMinutes?autoTimeoutMinutes.value:"3";' +
     'var result={' +
     'lovenseHost:host,' +
     'lovensePort:port,' +
@@ -1229,6 +1263,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'batterySource:batterySource,' +
     'secondaryDisplay:secondaryDisplay,' +
     'touchPlayMode:touchPlayMode,' +
+    'autoTimeoutMinutes:autoTimeoutMinutes,' +
     'basicColorBg:document.getElementById("basicColorBg").value,' +
     'basicColorText:document.getElementById("basicColorText").value,' +
     'basicColorAccent:document.getElementById("basicColorAccent").value,' +
@@ -1282,6 +1317,10 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.touchPlayMode !== undefined) {
       localStorage.setItem('touchPlayMode', settings.touchPlayMode);
       sendTouchPlayModeToWatch(settings.touchPlayMode);
+    }
+    if (settings.autoTimeoutMinutes !== undefined) {
+      localStorage.setItem('autoTimeoutMinutes', settings.autoTimeoutMinutes);
+      sendAutoTimeoutMinutesToWatch(settings.autoTimeoutMinutes);
     }
     if (settings.batterySource !== undefined) {
       localStorage.setItem('batterySource', settings.batterySource);

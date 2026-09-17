@@ -55,6 +55,7 @@
 #define PERSIST_KEY_BATTERY_SOURCE 10
 #define PERSIST_KEY_SECONDARY_DISPLAY 11
 #define PERSIST_KEY_TOUCH_MODE 12
+#define PERSIST_KEY_AUTO_TIMEOUT 13
 
 #define TIP_DEFAULT_TEXT "Hold UP/DOWN: pattern\nHold SELECT: toy"
 
@@ -165,6 +166,48 @@ static bool s_idle = false; // true after IDLE_TIMEOUT_MS with no button press
 static AppTimer *s_idle_timer = NULL;
 #define IDLE_TIMEOUT_MS 10000
 
+// Safety auto-pause: after s_auto_timeout_minutes of continuous vibration
+// with no interaction, force a pause. 0 = off. Both timers are only ever
+// armed while s_active - see reset_idle_timer().
+static int s_auto_timeout_minutes = 3;
+static AppTimer *s_auto_timeout_timer = NULL;
+static AppTimer *s_timeout_warning_timer = NULL;
+#define TIMEOUT_WARNING_LEAD_MS 15000
+#define TIMEOUT_WARNING_PULSE_MS 1750
+
+// Gesture-control-change hint card: brief slide-in explanation shown whenever
+// the phone changes touch_play_mode, so the new gesture set is discoverable
+// without needing to already know it. Created once in window_load and
+// reused for every trigger, rather than torn down/rebuilt with the Basic/
+// Discrete UI - show_gesture_hint_card() re-parents it to the top of the
+// root layer on every trigger, so it stays above whichever container is
+// currently built regardless of intervening switch_ui_style() rebuilds.
+static Layer *s_hint_card_layer = NULL;
+static bool s_hint_card_visible = false;
+static AppTimer *s_hint_card_dismiss_timer = NULL;
+static PropertyAnimation *s_hint_card_anim = NULL;
+static char s_hint_card_text[140];
+static GPoint s_hint_touch_down_point;
+#define HINT_CARD_HEIGHT 54
+#define HINT_CARD_ANIM_MS 220
+#define HINT_CARD_AUTO_DISMISS_MS 15000
+#define HINT_CARD_SWIPE_THRESHOLD_PX 15
+
+#if defined(PBL_TOUCH)
+// Swipe-to-set-intensity overlay: a vertical drag on the touchscreen sets
+// intensity directly from finger position (bottom = 0, top = MAX_INTENSITY),
+// live during the drag, in both Basic and Discrete. Full-screen layer
+// created once in window_load (like the hint card above) so it survives
+// Basic/Discrete switches; switch_ui_style() re-raises it above whichever
+// container it just (re)built so it stays topmost.
+static Layer *s_swipe_overlay_layer = NULL;
+static int s_swipe_intensity = 0;            // 0-MAX_INTENSITY, live during a drag
+static uint8_t s_swipe_fade_progress = 255;  // 255 = fully visible, 0 = gone
+static Animation *s_swipe_fade_anim = NULL;
+static int s_swipe_last_sent = -1;           // last quantized value pushed via send_command_msg
+#define SWIPE_FADE_MS 120
+#endif
+
 static GColor s_basic_bg_color;
 static GColor s_basic_text_color;
 static GColor s_basic_accent_color;
@@ -184,6 +227,8 @@ static void click_config_provider(void *context);
 static void select_pattern(int pattern);
 static void cycle_pattern(int direction);
 static void apply_touch_mode(void);
+static void dismiss_gesture_hint_card(void);
+static void send_command_msg(const char *command, int intensity);
 
 static void log_heap(const char *label) {
   APP_LOG(APP_LOG_LEVEL_INFO, "[heap] %s: free=%d used=%d",
@@ -427,6 +472,7 @@ static void frame_update_proc(Layer *layer, GContext *ctx) {
 #endif
 }
 
+#if !defined(PBL_ROUND)
 static void day_row_update_proc(Layer *layer, GContext *ctx) {
   // Draws all 7 weekday letters in one layer instead of 7 separate
   // TextLayers - same visual result, far fewer allocated objects. Reused by
@@ -445,6 +491,7 @@ static void day_row_update_proc(Layer *layer, GContext *ctx) {
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
 }
+#endif
 
 static void status_row_update_proc(Layer *layer, GContext *ctx) {
   // "BT" label (always muted - the dot alone carries the connection state)
@@ -659,6 +706,7 @@ static int16_t pattern_register_col_x(int16_t bounds_w, int16_t col_w, int index
        : (int16_t)((bounds_w - col_w) / 2);
 }
 
+#if !defined(PBL_ROUND)
 static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   // Three columns (Steady/Pulse/Wave as I/II/III), space-between, reading
   // as a chrono totalizer. Only the currently selected pattern gets a
@@ -706,6 +754,7 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, underline, 0, GCornerNone);
   }
 }
+#endif
 
 static void bt_blink_handler(void *data) {
   s_bt_blink_on = !s_bt_blink_on;
@@ -1084,6 +1133,44 @@ static void idle_timeout_handler(void *data) {
   apply_idle_state();
 }
 
+static void auto_timeout_warning_pulse(void *data) {
+  vibes_short_pulse();
+  s_timeout_warning_timer = app_timer_register(TIMEOUT_WARNING_PULSE_MS, auto_timeout_warning_pulse, NULL);
+}
+
+static void auto_timeout_fire(void *data) {
+  s_auto_timeout_timer = NULL;
+  if (s_timeout_warning_timer) {
+    app_timer_cancel(s_timeout_warning_timer);
+    s_timeout_warning_timer = NULL;
+  }
+  // Force a pause, never a toggle - a stray re-fire must never resume playback.
+  s_active = false;
+  update_display();
+  send_command_msg("pause", s_intensity);
+}
+
+// Cancels and, if still active, re-arms both auto-timeout timers from now.
+// Called from reset_idle_timer() so every interaction path that already
+// signals "the user is present" also pushes the safety timeout back out.
+static void arm_auto_timeout_timers(void) {
+  if (s_auto_timeout_timer) {
+    app_timer_cancel(s_auto_timeout_timer);
+    s_auto_timeout_timer = NULL;
+  }
+  if (s_timeout_warning_timer) {
+    app_timer_cancel(s_timeout_warning_timer);
+    s_timeout_warning_timer = NULL;
+  }
+  if (!s_active || s_auto_timeout_minutes <= 0) {
+    return; // paused, or the safety timeout is set to Off - nothing to arm
+  }
+  uint32_t total_ms = (uint32_t)s_auto_timeout_minutes * 60000;
+  uint32_t warning_ms = total_ms > TIMEOUT_WARNING_LEAD_MS ? total_ms - TIMEOUT_WARNING_LEAD_MS : 0;
+  s_auto_timeout_timer = app_timer_register(total_ms, auto_timeout_fire, NULL);
+  s_timeout_warning_timer = app_timer_register(warning_ms, auto_timeout_warning_pulse, NULL);
+}
+
 static void reset_idle_timer(void) {
   // Called on every real button press - cancels any pending idle timeout
   // and, if we were already idle, immediately reverts to the vibration-
@@ -1101,6 +1188,7 @@ static void reset_idle_timer(void) {
   if (s_ui_style == UI_STYLE_DISCRETE) {
     s_idle_timer = app_timer_register(IDLE_TIMEOUT_MS, idle_timeout_handler, NULL);
   }
+  arm_auto_timeout_timers();
 }
 
 static void send_command_msg(const char *command, int intensity) {
@@ -1122,6 +1210,10 @@ static void send_command_msg(const char *command, int intensity) {
 }
 
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_hint_card_visible) {
+    dismiss_gesture_hint_card();
+    return;
+  }
   reset_idle_timer();
   s_intensity += STEP;
   if (s_intensity > MAX_INTENSITY) {
@@ -1140,6 +1232,10 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_hint_card_visible) {
+    dismiss_gesture_hint_card();
+    return;
+  }
   reset_idle_timer();
   s_intensity -= STEP;
   if (s_intensity < 0) {
@@ -1155,9 +1251,14 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
-  reset_idle_timer();
+  if (s_hint_card_visible) {
+    dismiss_gesture_hint_card();
+    return;
+  }
   // Pause/resume at the current intensity - doesn't touch s_intensity.
   s_active = !s_active;
+  // Toggle first so reset_idle_timer()'s auto-timeout arming sees the new state.
+  reset_idle_timer();
   update_display();
   if (s_active) {
     send_command_msg("vibrate", s_intensity);
@@ -1190,8 +1291,9 @@ static void cycle_pattern(int direction) {
 
 #if defined(PBL_TOUCH)
 static void gesture_toggle_play_pause(void) {
-  reset_idle_timer();
   s_active = !s_active;
+  // Toggle first so reset_idle_timer()'s auto-timeout arming sees the new state.
+  reset_idle_timer();
   update_display();
   vibes_short_pulse();
   send_command_msg(s_active ? "vibrate" : "pause", s_intensity);
@@ -1233,9 +1335,6 @@ static void tap_handler(AccelAxisType axis, int32_t direction) {
 // 6 o'clock tick, or Gabbro's round Digital face, which has no register at
 // all), so a long press there just cycles to the next pattern instead.
 static void handle_pattern_long_press(GPoint point) {
-  if (s_ui_style != UI_STYLE_DISCRETE) {
-    return;
-  }
 #if !defined(PBL_ROUND)
   if (s_discrete_face == DISCRETE_FACE_CHRONO && s_register_layer) {
     GRect register_frame = layer_get_frame(s_register_layer);
@@ -1266,6 +1365,87 @@ static void touch_tap_window_expire(void *data) {
   s_touch_tap_window_timer = NULL; // only one quick tap arrived - not a double-tap
 }
 
+static void swipe_overlay_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+
+  int fill_h = (int)((int32_t)bounds.size.h * s_swipe_intensity / MAX_INTENSITY);
+  GColor accent = (s_ui_style == UI_STYLE_DISCRETE) ? s_discrete_bezel_color : s_basic_accent_color;
+  GColor text_color = (s_ui_style == UI_STYLE_DISCRETE) ? s_discrete_text_color : s_basic_text_color;
+
+  // Fade scales the wash's alpha down toward 0 as the overlay dismisses;
+  // otherwise it sits at 0b10 (~67%), the closest GColor8 alpha step to the
+  // design's 60% target.
+  uint8_t alpha_bits = (uint8_t)((s_swipe_fade_progress * 2 + 127) / 255);
+  if (alpha_bits > 0b10) {
+    alpha_bits = 0b10;
+  }
+  GColor wash = accent;
+  wash.argb = (wash.argb & 0x3F) | (alpha_bits << 6);
+
+  GRect fill_rect = GRect(bounds.origin.x, bounds.origin.y + bounds.size.h - fill_h,
+                           bounds.size.w, fill_h);
+  graphics_context_set_fill_color(ctx, wash);
+  graphics_fill_rect(ctx, fill_rect, 0, GCornerNone);
+
+  char level_buf[4];
+  snprintf(level_buf, sizeof(level_buf), "%d", s_swipe_intensity);
+  GFont num_font = fonts_get_system_font(FONT_KEY_LECO_36_BOLD_NUMBERS);
+  GSize text_size = graphics_text_layout_get_content_size(
+      level_buf, num_font, bounds, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  int text_y = bounds.origin.y + (bounds.size.h - text_size.h) / 2;
+
+  // Split-color number: the same text is drawn twice with different clip
+  // boxes at the fill boundary, so the half sitting over the wash reads
+  // white and the half above it reads in the normal text color.
+  int white_top = bounds.origin.y + bounds.size.h - fill_h;
+
+  graphics_context_set_text_color(ctx, text_color);
+  int top_h = white_top - text_y;
+  if (top_h > 0) {
+    graphics_draw_text(ctx, level_buf, num_font, GRect(bounds.origin.x, text_y, bounds.size.w, top_h),
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  }
+
+  graphics_context_set_text_color(ctx, GColorWhite);
+  if (fill_h > 0) {
+    graphics_draw_text(ctx, level_buf, num_font, GRect(bounds.origin.x, white_top, bounds.size.w, fill_h),
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  }
+}
+
+static void swipe_fade_update(Animation *anim, AnimationProgress progress) {
+  s_swipe_fade_progress = (uint8_t)(255 - (progress * 255 / ANIMATION_NORMALIZED_MAX));
+  if (s_swipe_overlay_layer) {
+    layer_mark_dirty(s_swipe_overlay_layer);
+  }
+}
+
+static void swipe_fade_stopped(Animation *anim, bool finished, void *context) {
+  s_swipe_fade_anim = NULL;
+  if (s_swipe_overlay_layer) {
+    layer_set_hidden(s_swipe_overlay_layer, true);
+  }
+}
+
+static const AnimationImplementation s_swipe_fade_impl = {
+  .update = swipe_fade_update,
+};
+
+// 120ms linear fade-out on liftoff, so the overlay doesn't just vanish.
+static void trigger_swipe_fade(void) {
+  if (s_swipe_fade_anim) {
+    animation_unschedule(s_swipe_fade_anim);
+    animation_destroy(s_swipe_fade_anim);
+  }
+  s_swipe_fade_anim = animation_create();
+  animation_set_duration(s_swipe_fade_anim, SWIPE_FADE_MS);
+  animation_set_curve(s_swipe_fade_anim, AnimationCurveLinear);
+  animation_set_implementation(s_swipe_fade_anim, &s_swipe_fade_impl);
+  AnimationHandlers handlers = { .stopped = swipe_fade_stopped };
+  animation_set_handlers(s_swipe_fade_anim, handlers, NULL);
+  animation_schedule(s_swipe_fade_anim);
+}
+
 static void touch_handler(const TouchEvent *event, void *context) {
   switch (event->type) {
     case TouchEvent_Touchdown:
@@ -1276,21 +1456,63 @@ static void touch_handler(const TouchEvent *event, void *context) {
         app_timer_cancel(s_touch_long_press_timer);
       }
       s_touch_long_press_timer = app_timer_register(TOUCH_LONG_PRESS_MS, touch_long_press_fire, NULL);
+      // A fresh touch always wins over a fade left over from the previous
+      // drag's liftoff.
+      if (s_swipe_fade_anim) {
+        animation_unschedule(s_swipe_fade_anim);
+        animation_destroy(s_swipe_fade_anim);
+        s_swipe_fade_anim = NULL;
+      }
+      s_swipe_fade_progress = 255;
       break;
 
     case TouchEvent_PositionUpdate: {
-      if (s_touch_moved) {
-        break;
-      }
-      int16_t dx = (int16_t)(event->x - s_touch_down_point.x);
-      int16_t dy = (int16_t)(event->y - s_touch_down_point.y);
-      bool moved = dx > TOUCH_MOVE_THRESHOLD_PX || dx < -TOUCH_MOVE_THRESHOLD_PX
-                 || dy > TOUCH_MOVE_THRESHOLD_PX || dy < -TOUCH_MOVE_THRESHOLD_PX;
-      if (moved) {
+      if (!s_touch_moved) {
+        int16_t dx = (int16_t)(event->x - s_touch_down_point.x);
+        int16_t dy = (int16_t)(event->y - s_touch_down_point.y);
+        bool moved = dx > TOUCH_MOVE_THRESHOLD_PX || dx < -TOUCH_MOVE_THRESHOLD_PX
+                   || dy > TOUCH_MOVE_THRESHOLD_PX || dy < -TOUCH_MOVE_THRESHOLD_PX;
+        if (!moved) {
+          break;
+        }
         s_touch_moved = true;
         if (s_touch_long_press_timer) {
           app_timer_cancel(s_touch_long_press_timer);
           s_touch_long_press_timer = NULL;
+        }
+        reset_idle_timer();
+        s_swipe_last_sent = -1;
+        if (s_swipe_overlay_layer) {
+          layer_set_hidden(s_swipe_overlay_layer, false);
+        }
+      }
+
+      // Recomputed on every move past the first threshold-crossing (not
+      // just once), so the overlay and the toy both track the finger live.
+      Layer *window_layer = window_get_root_layer(s_window);
+      GRect bounds = layer_get_bounds(window_layer);
+      int raw = bounds.size.h > 0
+        ? ((int)(bounds.size.h - event->y) * MAX_INTENSITY) / bounds.size.h
+        : 0;
+      int quantized = ((raw + STEP / 2) / STEP) * STEP;
+      if (quantized < 0) {
+        quantized = 0;
+      } else if (quantized > MAX_INTENSITY) {
+        quantized = MAX_INTENSITY;
+      }
+      s_swipe_intensity = quantized;
+      if (s_swipe_overlay_layer) {
+        // At 0 there's nothing to show - hide outright rather than drawing
+        // an empty wash under a lone "0".
+        layer_set_hidden(s_swipe_overlay_layer, quantized == 0);
+        layer_mark_dirty(s_swipe_overlay_layer);
+      }
+      if (quantized != s_swipe_last_sent) {
+        s_swipe_last_sent = quantized;
+        if (s_active) {
+          send_command_msg("vibrate", quantized);
+        } else {
+          send_command_msg("ping", quantized);
         }
       }
       break;
@@ -1300,6 +1522,22 @@ static void touch_handler(const TouchEvent *event, void *context) {
       if (s_touch_long_press_timer) {
         app_timer_cancel(s_touch_long_press_timer);
         s_touch_long_press_timer = NULL;
+      }
+      if (s_touch_moved && s_swipe_last_sent >= 0) {
+        // This drag was driving the swipe overlay - commit the live value
+        // as the real intensity and let the wash fade out.
+        s_intensity = s_swipe_intensity;
+        update_display();
+        refresh_discrete_time();
+        if (s_active) {
+          send_command_msg("vibrate", s_intensity);
+        } else {
+          send_command_msg("ping", s_intensity);
+        }
+        if (s_intensity >= MAX_INTENSITY) {
+          vibes_short_pulse();
+        }
+        trigger_swipe_fade();
       }
       if (s_touch_long_press_fired || s_touch_moved) {
         break; // already handled as a long press, or this was a drag
@@ -1332,15 +1570,160 @@ static void apply_touch_mode(void) {
 }
 #endif // PBL_TOUCH
 
+static void hint_card_dismiss_timeout(void *data);
+
+static void hint_card_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 10, GCornersAll);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  GRect text_rect = GRect(bounds.origin.x + 12, bounds.origin.y + 6,
+                           bounds.size.w - 24, bounds.size.h - 12);
+  graphics_draw_text(ctx, s_hint_card_text, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+                      text_rect, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+}
+
+static void set_hint_card_text_for_mode(int mode) {
+  const char *text;
+  switch (mode) {
+    case TOUCH_MODE_ACCEL:
+      text = "Double-knock the watch to pause/resume.";
+      break;
+    case TOUCH_MODE_TOUCHSCREEN:
+      text = "Double-tap: pause/resume. Long-press: change pattern. Swipe: set intensity.";
+      break;
+    default: // TOUCH_MODE_OFF
+      text = "Buttons only.";
+      break;
+  }
+  strncpy(s_hint_card_text, text, sizeof(s_hint_card_text) - 1);
+  s_hint_card_text[sizeof(s_hint_card_text) - 1] = '\0';
+}
+
+static void hint_card_anim_stopped(Animation *animation, bool finished, void *context) {
+  s_hint_card_anim = NULL;
+  if (!s_hint_card_visible && s_hint_card_layer) {
+    layer_set_hidden(s_hint_card_layer, true);
+  }
+}
+
+static void hint_card_anim_teardown(void) {
+  if (s_hint_card_anim) {
+    animation_unschedule((Animation *)s_hint_card_anim);
+    property_animation_destroy(s_hint_card_anim);
+    s_hint_card_anim = NULL;
+  }
+}
+
+#if defined(PBL_TOUCH)
+// Overrides whatever apply_touch_mode() subscribed while the hint card is up
+// - the touch service only supports one subscriber at a time. Any drag past
+// a small threshold dismisses immediately; no need to wait for Liftoff.
+static void hint_touch_handler(const TouchEvent *event, void *context) {
+  switch (event->type) {
+    case TouchEvent_Touchdown:
+      s_hint_touch_down_point = GPoint(event->x, event->y);
+      break;
+    case TouchEvent_PositionUpdate: {
+      int16_t dx = (int16_t)(event->x - s_hint_touch_down_point.x);
+      int16_t dy = (int16_t)(event->y - s_hint_touch_down_point.y);
+      if (dx > HINT_CARD_SWIPE_THRESHOLD_PX || dx < -HINT_CARD_SWIPE_THRESHOLD_PX
+          || dy > HINT_CARD_SWIPE_THRESHOLD_PX || dy < -HINT_CARD_SWIPE_THRESHOLD_PX) {
+        dismiss_gesture_hint_card();
+      }
+      break;
+    }
+    case TouchEvent_Liftoff:
+      break;
+  }
+}
+#endif
+
+static void show_gesture_hint_card(int mode) {
+  if (!s_hint_card_layer) {
+    return;
+  }
+  set_hint_card_text_for_mode(mode);
+  hint_card_anim_teardown();
+  if (s_hint_card_dismiss_timer) {
+    app_timer_cancel(s_hint_card_dismiss_timer);
+  }
+
+  Layer *window_layer = window_get_root_layer(s_window);
+  layer_add_child(window_layer, s_hint_card_layer); // re-parent to the top
+  layer_set_hidden(s_hint_card_layer, false);
+  layer_mark_dirty(s_hint_card_layer);
+
+  GRect bounds = layer_get_bounds(window_layer);
+  GRect from = GRect(0, -HINT_CARD_HEIGHT, bounds.size.w, HINT_CARD_HEIGHT);
+  GRect to = GRect(0, 0, bounds.size.w, HINT_CARD_HEIGHT);
+  s_hint_card_anim = property_animation_create_layer_frame(s_hint_card_layer, &from, &to);
+  animation_set_duration((Animation *)s_hint_card_anim, HINT_CARD_ANIM_MS);
+  AnimationHandlers handlers = { .stopped = hint_card_anim_stopped };
+  animation_set_handlers((Animation *)s_hint_card_anim, handlers, NULL);
+  animation_schedule((Animation *)s_hint_card_anim);
+
+  s_hint_card_visible = true;
+  s_hint_card_dismiss_timer = app_timer_register(HINT_CARD_AUTO_DISMISS_MS, hint_card_dismiss_timeout, NULL);
+
+#if defined(PBL_TOUCH)
+  touch_service_unsubscribe();
+  touch_service_subscribe(hint_touch_handler, NULL);
+#endif
+}
+
+static void dismiss_gesture_hint_card(void) {
+  if (!s_hint_card_visible || !s_hint_card_layer) {
+    return;
+  }
+  s_hint_card_visible = false;
+  if (s_hint_card_dismiss_timer) {
+    app_timer_cancel(s_hint_card_dismiss_timer);
+    s_hint_card_dismiss_timer = NULL;
+  }
+  hint_card_anim_teardown();
+
+  Layer *window_layer = window_get_root_layer(s_window);
+  GRect bounds = layer_get_bounds(window_layer);
+  GRect from = layer_get_frame(s_hint_card_layer);
+  GRect to = GRect(0, -HINT_CARD_HEIGHT, bounds.size.w, HINT_CARD_HEIGHT);
+  s_hint_card_anim = property_animation_create_layer_frame(s_hint_card_layer, &from, &to);
+  animation_set_duration((Animation *)s_hint_card_anim, HINT_CARD_ANIM_MS);
+  AnimationHandlers handlers = { .stopped = hint_card_anim_stopped };
+  animation_set_handlers((Animation *)s_hint_card_anim, handlers, NULL);
+  animation_schedule((Animation *)s_hint_card_anim);
+
+  // Hands touch input back to whichever gesture mode is actually active -
+  // restores accelerometer/touchscreen/none per the current s_touch_mode.
+  apply_touch_mode();
+}
+
+static void hint_card_dismiss_timeout(void *data) {
+  s_hint_card_dismiss_timer = NULL;
+  dismiss_gesture_hint_card();
+}
+
 static void up_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_hint_card_visible) {
+    dismiss_gesture_hint_card();
+    return;
+  }
   cycle_pattern(1);
 }
 
 static void down_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_hint_card_visible) {
+    dismiss_gesture_hint_card();
+    return;
+  }
   cycle_pattern(-1);
 }
 
 static void select_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_hint_card_visible) {
+    dismiss_gesture_hint_card();
+    return;
+  }
   reset_idle_timer();
   // Ask the phone to cycle to the next toy (or "All Toys"). It replies with
   // the new selection's name via MESSAGE_KEY_toy_name.
@@ -1655,6 +2038,14 @@ static void switch_ui_style(void) {
     build_basic_ui(window_layer, bounds);
   }
 
+#if defined(PBL_TOUCH)
+  // Keep the swipe-intensity overlay topmost above whichever container this
+  // rebuild just (re)built.
+  if (s_swipe_overlay_layer) {
+    layer_insert_above_sibling(s_swipe_overlay_layer, discrete ? s_discrete_container : s_basic_container);
+  }
+#endif
+
   window_set_background_color(s_window, discrete ? s_discrete_bg_color : s_basic_bg_color);
   // Rebinding this here means buttons keep working no matter which UI (or
   // neither, momentarily) is currently built.
@@ -1740,6 +2131,14 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     s_touch_mode = (int)touch_mode_tuple->value->int32;
     persist_write_int(PERSIST_KEY_TOUCH_MODE, s_touch_mode);
     apply_touch_mode();
+    show_gesture_hint_card(s_touch_mode);
+  }
+
+  Tuple *auto_timeout_tuple = dict_find(iterator, MESSAGE_KEY_auto_timeout_minutes);
+  if (auto_timeout_tuple) {
+    s_auto_timeout_minutes = (int)auto_timeout_tuple->value->int32;
+    persist_write_int(PERSIST_KEY_AUTO_TIMEOUT, s_auto_timeout_minutes);
+    arm_auto_timeout_timers();
   }
 
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
@@ -1814,6 +2213,27 @@ static void window_load(Window *window) {
   // only called again from inbox_received_callback when s_touch_mode itself
   // changes, to switch which service is actually subscribed.
   apply_touch_mode();
+
+  // Created once here (not scoped to build_basic_ui/build_discrete_ui) so it
+  // survives Basic/Discrete switches - show_gesture_hint_card() re-parents it
+  // to the top of the root layer on every trigger.
+  Layer *window_layer = window_get_root_layer(s_window);
+  GRect bounds = layer_get_bounds(window_layer);
+  s_hint_card_layer = layer_create(GRect(0, -HINT_CARD_HEIGHT, bounds.size.w, HINT_CARD_HEIGHT));
+  layer_set_update_proc(s_hint_card_layer, hint_card_update_proc);
+  layer_set_hidden(s_hint_card_layer, true);
+  layer_add_child(window_layer, s_hint_card_layer);
+
+#if defined(PBL_TOUCH)
+  // Also created once here, full-screen, and kept topmost by
+  // switch_ui_style() re-raising it above whichever container it just
+  // (re)built.
+  s_swipe_overlay_layer = layer_create(bounds);
+  layer_set_update_proc(s_swipe_overlay_layer, swipe_overlay_update_proc);
+  layer_set_hidden(s_swipe_overlay_layer, true);
+  layer_add_child(window_layer, s_swipe_overlay_layer);
+#endif
+
   log_heap("window_load end");
 }
 
@@ -1821,9 +2241,19 @@ static void window_unload(Window *window) {
 #if defined(PBL_TOUCH)
   accel_tap_service_unsubscribe();
   touch_service_unsubscribe();
+  if (s_swipe_fade_anim) {
+    animation_unschedule(s_swipe_fade_anim);
+    animation_destroy(s_swipe_fade_anim);
+    s_swipe_fade_anim = NULL;
+  }
+  layer_destroy(s_swipe_overlay_layer);
+  s_swipe_overlay_layer = NULL;
 #endif
   teardown_basic_ui();
   teardown_discrete_ui();
+
+  layer_destroy(s_hint_card_layer);
+  s_hint_card_layer = NULL;
 }
 
 static void init(void) {
@@ -1871,6 +2301,9 @@ static void init(void) {
   s_touch_mode = persist_exists(PERSIST_KEY_TOUCH_MODE)
     ? persist_read_int(PERSIST_KEY_TOUCH_MODE)
     : TOUCH_MODE_ACCEL;
+  s_auto_timeout_minutes = persist_exists(PERSIST_KEY_AUTO_TIMEOUT)
+    ? persist_read_int(PERSIST_KEY_AUTO_TIMEOUT)
+    : 3;
 
   recompute_basic_pattern_color();
   recompute_discrete_muted();
@@ -1895,6 +2328,12 @@ static void deinit(void) {
   send_command_msg("stop", 0);
   if (s_idle_timer) {
     app_timer_cancel(s_idle_timer);
+  }
+  if (s_auto_timeout_timer) {
+    app_timer_cancel(s_auto_timeout_timer);
+  }
+  if (s_timeout_warning_timer) {
+    app_timer_cancel(s_timeout_warning_timer);
   }
   tick_timer_service_unsubscribe();
   log_heap("deinit start");
