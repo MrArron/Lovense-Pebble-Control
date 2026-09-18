@@ -201,6 +201,14 @@ static GPoint s_hint_touch_down_point;
 // Basic/Discrete switches; switch_ui_style() re-raises it above whichever
 // container it just (re)built so it stays topmost.
 static Layer *s_swipe_overlay_layer = NULL;
+// Child of s_swipe_overlay_layer, frame kept in sync with the fill boundary
+// every redraw - Pebble clips a layer's drawing to its own frame by default,
+// which is what actually reveals only the part of the (re-drawn, white)
+// number sitting over the wash. graphics_draw_text's own `box` argument
+// can't do this by itself: text always draws from the top of the box you
+// give it, so a shorter box only ever reveals the top of the glyph, never
+// lets you reveal just the bottom while keeping the glyph's position fixed.
+static Layer *s_swipe_number_white_layer = NULL;
 static int s_swipe_intensity = 0;            // 0-MAX_INTENSITY, live during a drag
 static uint8_t s_swipe_fade_progress = 255;  // 255 = fully visible, 0 = gone
 static Animation *s_swipe_fade_anim = NULL;
@@ -304,6 +312,28 @@ static GColor blend_colors(GColor a, GColor b) {
   int b_val = ((ab + bb + 1) / 2) * 85;
   return GColorFromRGB(r, g, b_val);
 #endif
+}
+
+// Weighted blend toward `bg` - `weight` is `fg`'s share, 0-255 (255 = pure
+// fg/opaque, 0 = pure bg/invisible). Used by the swipe-intensity overlay:
+// Pebble's solid fills (graphics_fill_rect et al.) ignore GColor8's alpha
+// channel entirely - confirmed on real Emery/Gabbro hardware, where a
+// "translucent" wash rendered fully opaque instead. Alpha compositing only
+// applies to bitmaps. Pre-blending in software and filling with the solid
+// result is the only way to get an actual translucent-looking wash.
+static GColor blend_toward(GColor fg, GColor bg, uint8_t weight) {
+  GColor8 cf = fg;
+  GColor8 cb = bg;
+  int fr = ((cf.argb >> 4) & 0x3) * 85;
+  int fg_ = ((cf.argb >> 2) & 0x3) * 85;
+  int fb = (cf.argb & 0x3) * 85;
+  int br = ((cb.argb >> 4) & 0x3) * 85;
+  int bg_ = ((cb.argb >> 2) & 0x3) * 85;
+  int bb = (cb.argb & 0x3) * 85;
+  int r = (fr * weight + br * (255 - weight)) / 255;
+  int g = (fg_ * weight + bg_ * (255 - weight)) / 255;
+  int b = (fb * weight + bb * (255 - weight)) / 255;
+  return GColorFromRGB(r, g, b);
 }
 
 static void recompute_discrete_muted(void) {
@@ -1371,16 +1401,15 @@ static void swipe_overlay_update_proc(Layer *layer, GContext *ctx) {
   int fill_h = (int)((int32_t)bounds.size.h * s_swipe_intensity / MAX_INTENSITY);
   GColor accent = (s_ui_style == UI_STYLE_DISCRETE) ? s_discrete_bezel_color : s_basic_accent_color;
   GColor text_color = (s_ui_style == UI_STYLE_DISCRETE) ? s_discrete_text_color : s_basic_text_color;
+  GColor bg_color = (s_ui_style == UI_STYLE_DISCRETE) ? s_discrete_bg_color : s_basic_bg_color;
 
-  // Fade scales the wash's alpha down toward 0 as the overlay dismisses;
-  // otherwise it sits at 0b10 (~67%), the closest GColor8 alpha step to the
-  // design's 60% target.
-  uint8_t alpha_bits = (uint8_t)((s_swipe_fade_progress * 2 + 127) / 255);
-  if (alpha_bits > 0b10) {
-    alpha_bits = 0b10;
-  }
-  GColor wash = accent;
-  wash.argb = (wash.argb & 0x3F) | (alpha_bits << 6);
+  // See blend_toward()'s comment - real alpha transparency isn't available
+  // for a solid fill on this hardware, so this pre-blends toward the active
+  // background instead. Blending further toward pure background as the
+  // overlay fades out makes it visibly dissolve rather than relying on
+  // alpha (which wouldn't animate anyway, for the same reason).
+  uint8_t wash_weight = (uint8_t)(((uint16_t)153 * s_swipe_fade_progress) / 255); // 153/255 ~= 60%
+  GColor wash = blend_toward(accent, bg_color, wash_weight);
 
   GRect fill_rect = GRect(bounds.origin.x, bounds.origin.y + bounds.size.h - fill_h,
                            bounds.size.w, fill_h);
@@ -1394,23 +1423,44 @@ static void swipe_overlay_update_proc(Layer *layer, GContext *ctx) {
       level_buf, num_font, bounds, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
   int text_y = bounds.origin.y + (bounds.size.h - text_size.h) / 2;
 
-  // Split-color number: the same text is drawn twice with different clip
-  // boxes at the fill boundary, so the half sitting over the wash reads
-  // white and the half above it reads in the normal text color.
-  int white_top = bounds.origin.y + bounds.size.h - fill_h;
-
+  // Full glyph, fixed at true screen center regardless of fill height -
+  // s_swipe_number_white_layer (a child, drawn after/on top of this) redraws
+  // the same glyph in white, clipped to just the portion over the wash.
   graphics_context_set_text_color(ctx, text_color);
-  int top_h = white_top - text_y;
-  if (top_h > 0) {
-    graphics_draw_text(ctx, level_buf, num_font, GRect(bounds.origin.x, text_y, bounds.size.w, top_h),
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  graphics_draw_text(ctx, level_buf, num_font, GRect(bounds.origin.x, text_y, bounds.size.w, text_size.h),
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+
+  if (s_swipe_number_white_layer) {
+    int white_top = bounds.origin.y + bounds.size.h - fill_h;
+    layer_set_frame(s_swipe_number_white_layer, GRect(bounds.origin.x, white_top, bounds.size.w, fill_h));
+    layer_mark_dirty(s_swipe_number_white_layer);
   }
+}
+
+// Redraws the same glyph as swipe_overlay_update_proc's dark copy, in
+// white, on top of it. This layer's frame is the fill-boundary sub-rect
+// (set every redraw above), and Pebble clips a layer's own drawing to its
+// frame by default - that clip is what reveals only the part of the number
+// sitting over the wash. graphics_draw_text always draws from the top of
+// the box it's given, so to land the glyph at the same absolute position
+// as the dark copy, its box is offset by this layer's own frame origin
+// (update_procs draw in the layer's local coordinate space).
+static void swipe_overlay_white_update_proc(Layer *layer, GContext *ctx) {
+  GRect frame = layer_get_frame(layer);
+  GRect bounds = layer_get_bounds(window_get_root_layer(s_window));
+
+  char level_buf[4];
+  snprintf(level_buf, sizeof(level_buf), "%d", s_swipe_intensity);
+  GFont num_font = fonts_get_system_font(FONT_KEY_LECO_36_BOLD_NUMBERS);
+  GSize text_size = graphics_text_layout_get_content_size(
+      level_buf, num_font, bounds, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  int text_y = bounds.origin.y + (bounds.size.h - text_size.h) / 2;
 
   graphics_context_set_text_color(ctx, GColorWhite);
-  if (fill_h > 0) {
-    graphics_draw_text(ctx, level_buf, num_font, GRect(bounds.origin.x, white_top, bounds.size.w, fill_h),
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-  }
+  graphics_draw_text(ctx, level_buf, num_font,
+                      GRect(bounds.origin.x - frame.origin.x, text_y - frame.origin.y,
+                            bounds.size.w, text_size.h),
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
 static void swipe_fade_update(Animation *anim, AnimationProgress progress) {
@@ -2268,6 +2318,13 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_swipe_overlay_layer, swipe_overlay_update_proc);
   layer_set_hidden(s_swipe_overlay_layer, true);
   layer_add_child(window_layer, s_swipe_overlay_layer);
+
+  // Child of the overlay (not window_layer) so hiding/showing the overlay
+  // cascades to this automatically. Initial frame is irrelevant -
+  // swipe_overlay_update_proc repositions it every redraw.
+  s_swipe_number_white_layer = layer_create(bounds);
+  layer_set_update_proc(s_swipe_number_white_layer, swipe_overlay_white_update_proc);
+  layer_add_child(s_swipe_overlay_layer, s_swipe_number_white_layer);
 #endif
 
   log_heap("window_load end");
@@ -2282,6 +2339,8 @@ static void window_unload(Window *window) {
     animation_destroy(s_swipe_fade_anim);
     s_swipe_fade_anim = NULL;
   }
+  layer_destroy(s_swipe_number_white_layer);
+  s_swipe_number_white_layer = NULL;
   layer_destroy(s_swipe_overlay_layer);
   s_swipe_overlay_layer = NULL;
 #endif
