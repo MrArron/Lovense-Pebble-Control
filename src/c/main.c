@@ -1408,7 +1408,7 @@ static void swipe_overlay_update_proc(Layer *layer, GContext *ctx) {
   // background instead. Blending further toward pure background as the
   // overlay fades out makes it visibly dissolve rather than relying on
   // alpha (which wouldn't animate anyway, for the same reason).
-  uint8_t wash_weight = (uint8_t)(((uint16_t)90 * s_swipe_fade_progress) / 255); // 90/255 ~= 35%
+  uint8_t wash_weight = (uint8_t)(((uint16_t)153 * s_swipe_fade_progress) / 255); // 153/255 ~= 60%
   GColor wash = blend_toward(accent, bg_color, wash_weight);
 
   GRect fill_rect = GRect(bounds.origin.x, bounds.origin.y + bounds.size.h - fill_h,
