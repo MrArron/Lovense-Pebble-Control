@@ -11,12 +11,38 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Published**, current version **1.1.2**. Confirmed working on real Pebble
-Time 2 (Emery) hardware: boot, Basic mode, both Discrete faces, the gesture
-control options (accelerometer double-knock and the touchscreen's double-tap/
-long-press), and the settings page. Chalk and Gabbro (both round) have only
-been verified in the emulator - no round hardware has been available to test
-against yet.
+**Published**, current version **1.2.0**. Confirmed working on real hardware
+for both touch-capable platforms: Pebble Time 2 (Emery) and Pebble Round 2
+(Gabbro) - boot, Basic mode, both Discrete faces, all three gesture-control
+modes (accelerometer double-knock, and the touchscreen's double-tap/
+long-press/swipe-to-set-intensity), the safety auto-pause timer, and the
+settings page. Chalk (round, non-touch) has only been verified in the
+emulator - no non-Gabbro round hardware has been available to test against
+yet.
+
+**This round (touch/gesture round) added**: a swipe-to-set-intensity touch
+overlay (a vertical drag anywhere on screen sets vibration level directly
+from absolute touch position, live, on Emery/Gabbro in Touchscreen mode) with
+a wash-fill + split-color number visual and a brief fade-out on liftoff;
+long-press-to-cycle-pattern extended to Basic mode (previously
+Discrete-only, for consistent touch behavior across all three faces); a
+gesture-control-change hint card that slides in to explain the active
+gesture mode's controls whenever it changes, auto-dismissing after a few
+seconds or on any button press/swipe; a configurable safety auto-pause
+(stops vibration after continuous use - Off/1/3/5/10/15 minutes, default 3,
+with a haptic warning in the final 15 seconds, reset by any button press or
+touch); and WCAG contrast fixes across 8 of the 15 built-in color presets.
+
+Two real bugs surfaced specifically by hardware testing this round (the
+emulator has no touch-simulation path at all, so neither was catchable
+before real-device testing), both since fixed: the swipe overlay's intended
+translucent wash rendered fully opaque on real hardware (Pebble's solid
+fills ignore `GColor8`'s alpha channel entirely - alpha only applies to
+bitmap compositing - fixed with a software color blend toward the active
+background instead), and the overlay's number briefly rendered pinned to
+the fill boundary instead of staying centered (a text-layout bug in how the
+split-color effect was drawn, not a hardware quirk - fixed by moving the
+white half of the number into its own clipped child layer).
 
 **Local build/test toolchain**: this project builds and runs locally via
 `pebble-tool` + the Pebble SDK (WSL/Ubuntu, since the SDK doesn't run on
@@ -67,9 +93,9 @@ mid-session. The default color scheme (both display styles) is now the
 logo (`resources/images/icon~color.png` / `icon~bw.png`).
 
 **Deferred, not yet built**: persisting the selected pattern/toy across app
-restarts, real-hardware testing/layout tuning for Chalk and Gabbro, and a
-marketing GIF refresh once round hardware is available to shoot on. See
-"Extending it" at the bottom.
+restarts, and real-hardware testing/layout tuning for Chalk (the one round
+platform not yet confirmed on physical hardware). See "Extending it" at the
+bottom.
 
 **To resume this work in a new session**, the most useful things to paste
 back in are: this README (has all the design decisions and reasoning), and
