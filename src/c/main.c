@@ -190,7 +190,7 @@ static char s_hint_card_text[140];
 static GPoint s_hint_touch_down_point;
 #define HINT_CARD_HEIGHT 54
 #define HINT_CARD_ANIM_MS 220
-#define HINT_CARD_AUTO_DISMISS_MS 15000
+#define HINT_CARD_AUTO_DISMISS_MS 6000
 #define HINT_CARD_SWIPE_THRESHOLD_PX 15
 
 #if defined(PBL_TOUCH)
@@ -1420,11 +1420,34 @@ static void swipe_fade_update(Animation *anim, AnimationProgress progress) {
   }
 }
 
+// Basic mode's status/intensity/pattern readouts sit at the same vertical
+// center the overlay's own split-color number occupies. The overlay is
+// translucent (not a flat opaque cover), so leaving them visible underneath
+// reads as garbled overlapping text during a drag instead of a clean
+// readout - hide them for the duration of the gesture and restore once the
+// overlay is fully gone. No-op in Discrete mode, which has no equivalent
+// same-position text to collide with.
+static void set_basic_readouts_hidden(bool hidden) {
+  if (s_ui_style != UI_STYLE_BASIC) {
+    return;
+  }
+  if (s_intensity_layer) {
+    layer_set_hidden(text_layer_get_layer(s_intensity_layer), hidden);
+  }
+  if (s_status_layer) {
+    layer_set_hidden(text_layer_get_layer(s_status_layer), hidden);
+  }
+  if (s_pattern_layer) {
+    layer_set_hidden(s_pattern_layer, hidden);
+  }
+}
+
 static void swipe_fade_stopped(Animation *anim, bool finished, void *context) {
   s_swipe_fade_anim = NULL;
   if (s_swipe_overlay_layer) {
     layer_set_hidden(s_swipe_overlay_layer, true);
   }
+  set_basic_readouts_hidden(false);
 }
 
 static const AnimationImplementation s_swipe_fade_impl = {
@@ -1485,6 +1508,7 @@ static void touch_handler(const TouchEvent *event, void *context) {
         if (s_swipe_overlay_layer) {
           layer_set_hidden(s_swipe_overlay_layer, false);
         }
+        set_basic_readouts_hidden(true);
       }
 
       // Recomputed on every move past the first threshold-crossing (not
@@ -2063,6 +2087,18 @@ static void rebuild_discrete_face(void) {
   GRect bounds = layer_get_bounds(window_layer);
   teardown_discrete_ui();
   build_discrete_ui(window_layer, bounds);
+#if defined(PBL_TOUCH)
+  // build_discrete_ui() just re-added s_discrete_container as window_layer's
+  // newest child, which buries the swipe overlay (added once, much earlier,
+  // in window_load) behind it - same re-raise switch_ui_style() already does
+  // after its own rebuild. Without this, the overlay silently stops
+  // rendering the moment the phone sends a discrete_face message, which
+  // happens on every app launch (index.js's `ready` handler), not just when
+  // the user actually changes the face.
+  if (s_swipe_overlay_layer) {
+    layer_insert_above_sibling(s_swipe_overlay_layer, s_discrete_container);
+  }
+#endif
   apply_idle_state();
 }
 
