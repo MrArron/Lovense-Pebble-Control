@@ -693,10 +693,14 @@ Pebble.addEventListener('showConfiguration', function () {
   // swatches (see swatchRow() below) - Discrete's own basic_bg_color etc.
   // are still sent/persisted separately on the wire, just always kept equal
   // to these from here on.
-  var basicBg = getSetting('basicColorBg', '#ffffff');
-  var basicText = getSetting('basicColorText', '#000000');
-  var basicAccent = getSetting('basicColorAccent', '#ff2d89');
-  var discreteActive = getSetting('discreteColorActive', '#ff2d89');
+  // Escaped at the source (not just at render sites) so every downstream
+  // splice - swatchRow's hidden inputs, the Custom-tab live preview markup
+  // - inherits it automatically. A no-op for a real hex color; only matters
+  // if localStorage ever held something else (e.g. tampered outside the app).
+  var basicBg = escapeHtml(getSetting('basicColorBg', '#ffffff'));
+  var basicText = escapeHtml(getSetting('basicColorText', '#000000'));
+  var basicAccent = escapeHtml(getSetting('basicColorAccent', '#ff2d89'));
+  var discreteActive = escapeHtml(getSetting('discreteColorActive', '#ff2d89'));
 
   // MD3 redesign added a "System" option alongside the old dark/light
   // toggle for the settings page's own chrome - getEnumSetting() falls back
@@ -984,9 +988,9 @@ Pebble.addEventListener('showConfiguration', function () {
     '<p class="m3-hint">Enable <b>Game Mode</b> in the Lovense Remote app (Discover &gt; Game Mode). Both phones must be on the same Wi-Fi network.</p>' +
     '<div class="m3-card">' +
     '<p class="m3-card-title">Connection</p>' +
-    '<div class="m3-field-wrap"><input id="host" type="text" class="m3-field" oninput="onFieldInput(this)" value="' + decodeURIComponent(host) + '">' +
+    '<div class="m3-field-wrap"><input id="host" type="text" class="m3-field" oninput="onFieldInput(this)" value="' + escapeHtml(decodeURIComponent(host)) + '">' +
     '<span class="m3-field-label">Lovense Remote IP address</span></div>' +
-    '<div class="m3-field-wrap" style="margin-bottom:0"><input id="port" type="text" class="m3-field" oninput="onFieldInput(this)" value="' + decodeURIComponent(port) + '">' +
+    '<div class="m3-field-wrap" style="margin-bottom:0"><input id="port" type="text" class="m3-field" oninput="onFieldInput(this)" value="' + escapeHtml(decodeURIComponent(port)) + '">' +
     '<span class="m3-field-label">Port</span></div>' +
     '</div>' +
     '<div class="m3-card">' +
@@ -1184,8 +1188,8 @@ Pebble.addEventListener('showConfiguration', function () {
 
     '<script>' +
     'var BUILTIN_PRESETS = ' + JSON.stringify(PRESETS) + ';' +
-    'var customPresets = (function(){try{return ' + (customPresetsRaw || '[]') + ';}catch(e){return [];}})();' +
-    'var toyGroups = (function(){try{return ' + (toyGroupsRaw || '[]') + ';}catch(e){return [];}})();' +
+    'var customPresets = (function(){try{return JSON.parse(' + JSON.stringify(customPresetsRaw || '[]') + ');}catch(e){return [];}})();' +
+    'var toyGroups = (function(){try{return JSON.parse(' + JSON.stringify(toyGroupsRaw || '[]') + ');}catch(e){return [];}})();' +
     'var discreteFace = "' + discreteFace + '";' +
     'var sysDark = false;' +
     'var snackbarTimer = null;' +
