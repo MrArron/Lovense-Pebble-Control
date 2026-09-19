@@ -213,6 +213,15 @@ static int s_swipe_intensity = 0;            // 0-MAX_INTENSITY, live during a d
 static uint8_t s_swipe_fade_progress = 255;  // 255 = fully visible, 0 = gone
 static Animation *s_swipe_fade_anim = NULL;
 static int s_swipe_last_sent = -1;           // last quantized value pushed via send_command_msg
+// Computed once in swipe_overlay_update_proc and reused by
+// swipe_overlay_white_update_proc, which lays out the exact same string in
+// the exact same font over the exact same bounds right after it - the white
+// layer is a child of the overlay layer, so Pebble always redraws it
+// immediately after its parent within the same frame, making this a safe
+// same-frame hand-off rather than a stale cache. Avoids computing text
+// layout twice per frame during a live swipe drag, which can redraw many
+// times a second.
+static GSize s_swipe_text_size;
 #define SWIPE_FADE_MS 120
 #endif
 
@@ -269,10 +278,18 @@ static GColor parse_hex_color(const char *hex) {
   return GColorFromRGB(r, g, b);
 }
 
-static uint32_t packed_from_hex(const char *hex) {
-  GColor c = parse_hex_color(hex);
+// Same 8-bit-packed representation as packed_from_hex() below, but from a
+// GColor already in hand - lets inbox_received_callback compare an
+// incoming color against the one currently applied without re-parsing hex
+// or round-tripping through persist storage, so it can skip the
+// persist_write_int()/apply_*_colors() work entirely when nothing changed.
+static uint32_t packed_from_color(GColor c) {
   GColor8 raw = c;
-  return (uint32_t)raw.argb; // stash the already-quantized 8-bit color directly
+  return (uint32_t)raw.argb;
+}
+
+static uint32_t packed_from_hex(const char *hex) {
+  return packed_from_color(parse_hex_color(hex));
 }
 
 static GColor color_from_packed(int packed) {
@@ -360,6 +377,23 @@ static int32_t layout_scale_permille(GRect bounds) {
   return (w_ratio < h_ratio) ? w_ratio : h_ratio;
 }
 
+// The window's bounds never change at runtime on a given device, so this
+// scale factor is really a per-platform constant - but several redraw
+// callbacks (analog_hands_update_proc, chrono_subdial_update_proc,
+// pattern_register_update_proc, handle_pattern_long_press) were each
+// recomputing it via layout_scale_permille() on every single call, on every
+// redraw. Cached here after the first call instead - computed once, reused
+// for the rest of the app's lifetime.
+static int32_t cached_layout_scale_permille(void) {
+  static int32_t s_scale = 0;
+  static bool s_scale_computed = false;
+  if (!s_scale_computed) {
+    s_scale = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+    s_scale_computed = true;
+  }
+  return s_scale;
+}
+
 static int16_t emery_px(int16_t px, int32_t permille) {
   int16_t v = (int16_t)(((int32_t)px * permille) / 1000);
   return v > 0 ? v : 1; // never let a scaled width/length collapse to 0
@@ -390,17 +424,28 @@ static void draw_rotated_rect(GContext *ctx, GPoint pivot, int32_t angle,
   int16_t perp_x = (int16_t)((c * half_w) / TRIG_MAX_RATIO);
   int16_t perp_y = (int16_t)((s * half_w) / TRIG_MAX_RATIO);
 
-  GPoint pts[4] = {
-    { (int16_t)(near_c.x - perp_x), (int16_t)(near_c.y - perp_y) },
-    { (int16_t)(near_c.x + perp_x), (int16_t)(near_c.y + perp_y) },
-    { (int16_t)(far_c.x  + perp_x), (int16_t)(far_c.y  + perp_y) },
-    { (int16_t)(far_c.x  - perp_x), (int16_t)(far_c.y  - perp_y) },
-  };
-  GPathInfo info = { .num_points = 4, .points = pts };
-  GPath *path = gpath_create(&info);
+  // A single GPath, created once and reused for every rotated-rect draw
+  // (ticks, hands, needles - up to ~15 calls per redraw, and this redraws
+  // once a second whenever the Analog face is idle or the Chrono face is
+  // active) instead of gpath_create()/gpath_destroy() on every single call.
+  // gpath_create() just copies the points pointer into the GPath struct, so
+  // overwriting this same static array and calling gpath_draw_filled again
+  // is equivalent to recreating the path from scratch, without repeatedly
+  // round-tripping the heap in the hottest redraw path in the app.
+  static GPoint s_rect_points[4];
+  static GPath *s_rect_path = NULL;
+  if (!s_rect_path) {
+    GPathInfo info = { .num_points = 4, .points = s_rect_points };
+    s_rect_path = gpath_create(&info);
+  }
+
+  s_rect_points[0] = GPoint((int16_t)(near_c.x - perp_x), (int16_t)(near_c.y - perp_y));
+  s_rect_points[1] = GPoint((int16_t)(near_c.x + perp_x), (int16_t)(near_c.y + perp_y));
+  s_rect_points[2] = GPoint((int16_t)(far_c.x  + perp_x), (int16_t)(far_c.y  + perp_y));
+  s_rect_points[3] = GPoint((int16_t)(far_c.x  - perp_x), (int16_t)(far_c.y  - perp_y));
+
   graphics_context_set_fill_color(ctx, color);
-  gpath_draw_filled(ctx, path);
-  gpath_destroy(path);
+  gpath_draw_filled(ctx, s_rect_path);
 }
 
 // Draws a small vector glyph encoding a Steady/Pulse/Wave pattern, centered
@@ -584,7 +629,7 @@ static void analog_hands_update_proc(Layer *layer, GContext *ctx) {
   int16_t level_hand_w = 4, level_hand_len = 55;
   int16_t cap_radius = 4;
 #else
-  int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+  int32_t k = cached_layout_scale_permille();
   int16_t quarter_w = emery_px(4, k), quarter_len = emery_px(11, k);
   int16_t hour_tick_w = emery_px(2, k), hour_tick_len = emery_px(7, k);
   int16_t hour_hand_w = emery_px(7, k), hour_hand_len = emery_px(39, k);
@@ -681,7 +726,7 @@ static void chrono_subdial_update_proc(Layer *layer, GContext *ctx) {
   int16_t cap_radius = 3;
   uint8_t ring_stroke = 2;
 #else
-  int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+  int32_t k = cached_layout_scale_permille();
   int16_t tick_w = emery_px(2, k), tick_len = emery_px(5, k);
   int16_t tick_radius = emery_px(21, k);
   int16_t needle_w = emery_px(5, k), needle_len = emery_px(20, k);
@@ -743,7 +788,7 @@ static void pattern_register_update_proc(Layer *layer, GContext *ctx) {
   // marker triangle + bold numeral + long underline; at level 0 nothing is
   // marked (all three muted, no triangle), per spec.
   GRect bounds = layer_get_bounds(layer);
-  int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+  int32_t k = cached_layout_scale_permille();
   int16_t col_w = emery_px(26, k);
   int16_t tri_w = emery_px(7, k), tri_h = emery_px(4, k);
   int16_t underline_sel_w = emery_px(14, k), underline_sel_h = emery_px(2, k);
@@ -1249,8 +1294,17 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_intensity > MAX_INTENSITY) {
     s_intensity = MAX_INTENSITY;
   }
+  // update_display() -> update_discrete_display() already marks the
+  // relevant layer (hands_layer for Analog, subdial/register for Chrono)
+  // dirty, which is all a level-only change needs - it reads s_intensity
+  // directly on its next redraw. A separate refresh_discrete_time() call
+  // used to run right after this on every UP/DOWN press: harmless for
+  // Analog's hands_layer (redundantly re-marking it dirty), but for Chrono
+  // with the Steps/Heart Rate secondary display it meant a real Health
+  // Service query on every single button press, to refresh a date/steps/HR
+  // readout that has nothing to do with vibration level and is already
+  // kept current by the regular per-second/per-minute tick handler.
   update_display();
-  refresh_discrete_time();
   // Only push to the toy live if we're currently active. While paused this
   // just updates the level that resume will use - but we still ping the
   // phone so every button press gets a connectivity check.
@@ -1271,8 +1325,9 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_intensity < 0) {
     s_intensity = 0;
   }
+  // See up_click_handler's comment - update_display() alone is sufficient
+  // for a level-only change.
   update_display();
-  refresh_discrete_time();
   if (s_active) {
     send_command_msg("vibrate", s_intensity);
   } else {
@@ -1368,7 +1423,7 @@ static void handle_pattern_long_press(GPoint point) {
 #if !defined(PBL_ROUND)
   if (s_discrete_face == DISCRETE_FACE_CHRONO && s_register_layer) {
     GRect register_frame = layer_get_frame(s_register_layer);
-    int32_t k = layout_scale_permille(layer_get_bounds(window_get_root_layer(s_window)));
+    int32_t k = cached_layout_scale_permille();
     int16_t col_w = emery_px(26, k);
     for (int i = 0; i < PATTERN_COUNT; i++) {
       int16_t col_x = pattern_register_col_x(register_frame.size.w, col_w, i);
@@ -1419,8 +1474,9 @@ static void swipe_overlay_update_proc(Layer *layer, GContext *ctx) {
   char level_buf[4];
   snprintf(level_buf, sizeof(level_buf), "%d", s_swipe_intensity);
   GFont num_font = fonts_get_system_font(FONT_KEY_LECO_36_BOLD_NUMBERS);
-  GSize text_size = graphics_text_layout_get_content_size(
+  s_swipe_text_size = graphics_text_layout_get_content_size(
       level_buf, num_font, bounds, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  GSize text_size = s_swipe_text_size;
   int text_y = bounds.origin.y + (bounds.size.h - text_size.h) / 2;
 
   // Full glyph, fixed at true screen center regardless of fill height -
@@ -1452,8 +1508,10 @@ static void swipe_overlay_white_update_proc(Layer *layer, GContext *ctx) {
   char level_buf[4];
   snprintf(level_buf, sizeof(level_buf), "%d", s_swipe_intensity);
   GFont num_font = fonts_get_system_font(FONT_KEY_LECO_36_BOLD_NUMBERS);
-  GSize text_size = graphics_text_layout_get_content_size(
-      level_buf, num_font, bounds, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  // Reuses the layout swipe_overlay_update_proc (this layer's parent) just
+  // computed for the identical string/font/bounds - see s_swipe_text_size's
+  // comment.
+  GSize text_size = s_swipe_text_size;
   int text_y = bounds.origin.y + (bounds.size.h - text_size.h) / 2;
 
   graphics_context_set_text_color(ctx, GColorWhite);
@@ -1943,7 +2001,7 @@ static void build_analog_face(GRect bounds) {
   GRect date_frame = GRect(102, 83, 48, 19);
   GRect status_frame = GRect(55, 147, 70, 15);
 #else
-  int32_t k = layout_scale_permille(bounds);
+  int32_t k = cached_layout_scale_permille();
   int16_t cx = emery_px(100, k);
   int16_t cy = emery_px(120, k);
   int16_t r = emery_px(64, k);
@@ -1980,7 +2038,7 @@ static void build_chrono_face(GRect bounds) {
   GRect date_frame = GRect(0, 91, bounds.size.w, 16);
   GRect subdial_frame = GRect(65, 112, 50, 50);
 #else
-  int32_t k = layout_scale_permille(bounds);
+  int32_t k = cached_layout_scale_permille();
   GRect status_frame = GRect(emery_px(10, k), emery_px(10, k),
                               (int16_t)(bounds.size.w - 2 * emery_px(10, k)), emery_px(18, k));
   GRect day_row_frame = GRect(0, emery_px(34, k), bounds.size.w, 24);
@@ -2155,18 +2213,32 @@ static void rebuild_discrete_face(void) {
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
   log_heap("inbox_received_callback start");
 
+  // The phone resends its whole settings snapshot on every launch (see
+  // pkjs's `ready` handler - "in case they were never pushed down before"),
+  // not just when something actually changed. Every tuple handler below is
+  // guarded so a same-value resync skips the persist_write_int() flash
+  // write and whatever rebuild/side-effect it would otherwise trigger -
+  // previously this meant a full UI teardown/rebuild, a handful of flash
+  // writes, and (for touch_mode) the gesture hint card popping up on
+  // literally every app open, not just when a setting actually changed.
   Tuple *ui_style_tuple = dict_find(iterator, MESSAGE_KEY_ui_style);
   if (ui_style_tuple) {
-    s_ui_style = (int)ui_style_tuple->value->int32;
-    persist_write_int(PERSIST_KEY_UI_STYLE, s_ui_style);
-    switch_ui_style();
+    int new_ui_style = (int)ui_style_tuple->value->int32;
+    if (new_ui_style != s_ui_style) {
+      s_ui_style = new_ui_style;
+      persist_write_int(PERSIST_KEY_UI_STYLE, s_ui_style);
+      switch_ui_style();
+    }
   }
 
   Tuple *discrete_face_tuple = dict_find(iterator, MESSAGE_KEY_discrete_face);
   if (discrete_face_tuple) {
-    s_discrete_face = (int)discrete_face_tuple->value->int32;
-    persist_write_int(PERSIST_KEY_DISCRETE_FACE, s_discrete_face);
-    rebuild_discrete_face();
+    int new_discrete_face = (int)discrete_face_tuple->value->int32;
+    if (new_discrete_face != s_discrete_face) {
+      s_discrete_face = new_discrete_face;
+      persist_write_int(PERSIST_KEY_DISCRETE_FACE, s_discrete_face);
+      rebuild_discrete_face();
+    }
   }
 
   Tuple *toy_connected_tuple = dict_find(iterator, MESSAGE_KEY_toy_connected);
@@ -2200,80 +2272,116 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
   Tuple *battery_source_tuple = dict_find(iterator, MESSAGE_KEY_battery_source);
   if (battery_source_tuple) {
-    s_battery_source = (int)battery_source_tuple->value->int32;
-    persist_write_int(PERSIST_KEY_BATTERY_SOURCE, s_battery_source);
-    update_basic_toy_row();
+    int new_battery_source = (int)battery_source_tuple->value->int32;
+    if (new_battery_source != s_battery_source) {
+      s_battery_source = new_battery_source;
+      persist_write_int(PERSIST_KEY_BATTERY_SOURCE, s_battery_source);
+      update_basic_toy_row();
+    }
   }
 
   Tuple *secondary_display_tuple = dict_find(iterator, MESSAGE_KEY_secondary_display);
   if (secondary_display_tuple) {
-    s_secondary_display = (int)secondary_display_tuple->value->int32;
-    persist_write_int(PERSIST_KEY_SECONDARY_DISPLAY, s_secondary_display);
-    refresh_discrete_time();
+    int new_secondary_display = (int)secondary_display_tuple->value->int32;
+    if (new_secondary_display != s_secondary_display) {
+      s_secondary_display = new_secondary_display;
+      persist_write_int(PERSIST_KEY_SECONDARY_DISPLAY, s_secondary_display);
+      refresh_discrete_time();
+    }
   }
 
   Tuple *touch_mode_tuple = dict_find(iterator, MESSAGE_KEY_touch_play_mode);
   if (touch_mode_tuple) {
-    s_touch_mode = (int)touch_mode_tuple->value->int32;
-    persist_write_int(PERSIST_KEY_TOUCH_MODE, s_touch_mode);
-    apply_touch_mode();
-    show_gesture_hint_card(s_touch_mode);
+    int new_touch_mode = (int)touch_mode_tuple->value->int32;
+    // This guard is the fix for the hint card appearing on every launch,
+    // not just on an actual gesture-mode change - see the block comment
+    // above.
+    if (new_touch_mode != s_touch_mode) {
+      s_touch_mode = new_touch_mode;
+      persist_write_int(PERSIST_KEY_TOUCH_MODE, s_touch_mode);
+      apply_touch_mode();
+      show_gesture_hint_card(s_touch_mode);
+    }
   }
 
   Tuple *auto_timeout_tuple = dict_find(iterator, MESSAGE_KEY_auto_timeout_minutes);
   if (auto_timeout_tuple) {
-    s_auto_timeout_minutes = (int)auto_timeout_tuple->value->int32;
-    persist_write_int(PERSIST_KEY_AUTO_TIMEOUT, s_auto_timeout_minutes);
-    arm_auto_timeout_timers();
+    int new_auto_timeout = (int)auto_timeout_tuple->value->int32;
+    if (new_auto_timeout != s_auto_timeout_minutes) {
+      s_auto_timeout_minutes = new_auto_timeout;
+      persist_write_int(PERSIST_KEY_AUTO_TIMEOUT, s_auto_timeout_minutes);
+      arm_auto_timeout_timers();
+    }
   }
 
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
   if (bg_tuple) {
-    s_basic_bg_color = parse_hex_color(bg_tuple->value->cstring);
-    persist_write_int(PERSIST_KEY_BASIC_BG, (int)packed_from_hex(bg_tuple->value->cstring));
-    apply_basic_colors();
+    GColor new_color = parse_hex_color(bg_tuple->value->cstring);
+    if (packed_from_color(new_color) != packed_from_color(s_basic_bg_color)) {
+      s_basic_bg_color = new_color;
+      persist_write_int(PERSIST_KEY_BASIC_BG, (int)packed_from_color(new_color));
+      apply_basic_colors();
+    }
   }
 
   Tuple *text_tuple = dict_find(iterator, MESSAGE_KEY_basic_text_color);
   if (text_tuple) {
-    s_basic_text_color = parse_hex_color(text_tuple->value->cstring);
-    persist_write_int(PERSIST_KEY_BASIC_TEXT, (int)packed_from_hex(text_tuple->value->cstring));
-    apply_basic_colors();
+    GColor new_color = parse_hex_color(text_tuple->value->cstring);
+    if (packed_from_color(new_color) != packed_from_color(s_basic_text_color)) {
+      s_basic_text_color = new_color;
+      persist_write_int(PERSIST_KEY_BASIC_TEXT, (int)packed_from_color(new_color));
+      apply_basic_colors();
+    }
   }
 
   Tuple *accent_tuple = dict_find(iterator, MESSAGE_KEY_basic_accent_color);
   if (accent_tuple) {
-    s_basic_accent_color = parse_hex_color(accent_tuple->value->cstring);
-    persist_write_int(PERSIST_KEY_BASIC_ACCENT, (int)packed_from_hex(accent_tuple->value->cstring));
-    apply_basic_colors();
+    GColor new_color = parse_hex_color(accent_tuple->value->cstring);
+    if (packed_from_color(new_color) != packed_from_color(s_basic_accent_color)) {
+      s_basic_accent_color = new_color;
+      persist_write_int(PERSIST_KEY_BASIC_ACCENT, (int)packed_from_color(new_color));
+      apply_basic_colors();
+    }
   }
 
   Tuple *discrete_bezel_tuple = dict_find(iterator, MESSAGE_KEY_discrete_bezel_color);
   if (discrete_bezel_tuple) {
-    s_discrete_bezel_color = parse_hex_color(discrete_bezel_tuple->value->cstring);
-    persist_write_int(PERSIST_KEY_DISCRETE_BEZEL, (int)packed_from_hex(discrete_bezel_tuple->value->cstring));
-    apply_discrete_colors();
+    GColor new_color = parse_hex_color(discrete_bezel_tuple->value->cstring);
+    if (packed_from_color(new_color) != packed_from_color(s_discrete_bezel_color)) {
+      s_discrete_bezel_color = new_color;
+      persist_write_int(PERSIST_KEY_DISCRETE_BEZEL, (int)packed_from_color(new_color));
+      apply_discrete_colors();
+    }
   }
 
   Tuple *discrete_bg_tuple = dict_find(iterator, MESSAGE_KEY_discrete_bg_color);
   if (discrete_bg_tuple) {
-    s_discrete_bg_color = parse_hex_color(discrete_bg_tuple->value->cstring);
-    persist_write_int(PERSIST_KEY_DISCRETE_BG, (int)packed_from_hex(discrete_bg_tuple->value->cstring));
-    apply_discrete_colors();
+    GColor new_color = parse_hex_color(discrete_bg_tuple->value->cstring);
+    if (packed_from_color(new_color) != packed_from_color(s_discrete_bg_color)) {
+      s_discrete_bg_color = new_color;
+      persist_write_int(PERSIST_KEY_DISCRETE_BG, (int)packed_from_color(new_color));
+      apply_discrete_colors();
+    }
   }
 
   Tuple *discrete_text_tuple = dict_find(iterator, MESSAGE_KEY_discrete_text_color);
   if (discrete_text_tuple) {
-    s_discrete_text_color = parse_hex_color(discrete_text_tuple->value->cstring);
-    persist_write_int(PERSIST_KEY_DISCRETE_TEXT, (int)packed_from_hex(discrete_text_tuple->value->cstring));
-    apply_discrete_colors();
+    GColor new_color = parse_hex_color(discrete_text_tuple->value->cstring);
+    if (packed_from_color(new_color) != packed_from_color(s_discrete_text_color)) {
+      s_discrete_text_color = new_color;
+      persist_write_int(PERSIST_KEY_DISCRETE_TEXT, (int)packed_from_color(new_color));
+      apply_discrete_colors();
+    }
   }
 
   Tuple *discrete_active_tuple = dict_find(iterator, MESSAGE_KEY_discrete_active_color);
   if (discrete_active_tuple) {
-    s_discrete_active_color = parse_hex_color(discrete_active_tuple->value->cstring);
-    persist_write_int(PERSIST_KEY_DISCRETE_ACTIVE, (int)packed_from_hex(discrete_active_tuple->value->cstring));
-    apply_discrete_colors();
+    GColor new_color = parse_hex_color(discrete_active_tuple->value->cstring);
+    if (packed_from_color(new_color) != packed_from_color(s_discrete_active_color)) {
+      s_discrete_active_color = new_color;
+      persist_write_int(PERSIST_KEY_DISCRETE_ACTIVE, (int)packed_from_color(new_color));
+      apply_discrete_colors();
+    }
   }
 
   Tuple *command_tuple = dict_find(iterator, MESSAGE_KEY_command);
