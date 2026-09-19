@@ -48,7 +48,10 @@ white half of the number into its own clipped child layer).
 `pebble-tool` + the Pebble SDK (WSL/Ubuntu, since the SDK doesn't run on
 Windows directly) — `pebble build`, `pebble install --emulator <platform>`,
 `pebble screenshot`/`emu-app-config`, and `pebble publish` (release notes +
-screenshot/GIF upload) all work against this repo. Two build-breaking bugs
+screenshot/GIF upload) all work against this repo. **This toolchain, the
+emulator, and real hardware only exist on the developer's local machine —
+see `CLAUDE.md` for what that means for a Claude Code session working here
+without local access.** Two build-breaking bugs
 this surfaced early on and fixed: the repo was missing the `wscript` build
 script pebble-tool requires, and `package.json`'s launcher icon was declared
 as two separate `menuIcon: true` resources, which the SDK's appinfo generator
@@ -97,12 +100,15 @@ restarts, and real-hardware testing/layout tuning for Chalk (the one round
 platform not yet confirmed on physical hardware). See "Extending it" at the
 bottom.
 
-**To resume this work in a new session**, the most useful things to paste
-back in are: this README (has all the design decisions and reasoning), and
-a description of what's changed since if you've made manual edits. The
-project's current UUID, message-key list, and persisted-storage key
-numbering are all in `package.json`/`main.c` and shouldn't need to change
-for any of the deferred features above.
+**To resume this work in a new session** (local or cloud), the most useful
+things to have on hand are: this README (all the design decisions and
+reasoning) and `CLAUDE.md` (the build/test toolchain and what's local-only
+vs. safe for a cloud session to do) — both are tracked in the repo, so a
+fresh clone has them automatically. Paste in a description of what's
+changed since if you've made manual edits outside of git. The project's
+current UUID, message-key list, and persisted-storage key numbering are all
+in `package.json`/`main.c` and shouldn't need to change for any of the
+deferred features above.
 
 ## What's included
 
