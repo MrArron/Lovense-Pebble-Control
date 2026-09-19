@@ -11,16 +11,17 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Published**, current version **1.2.1**. Confirmed working on real hardware
+**Published**, current version **1.2.2**. Confirmed working on real hardware
 for both touch-capable platforms: Pebble Time 2 (Emery) and Pebble Round 2
 (Gabbro) - boot, Basic mode, both Discrete faces, all three gesture-control
 modes (accelerometer double-knock, and the touchscreen's double-tap/
 long-press/swipe-to-set-intensity), the safety auto-pause timer, and the
 settings page. Chalk (round, non-touch) has only been verified in the
 emulator - no non-Gabbro round hardware has been available to test against
-yet. The new Material 3 settings page (see below) is confirmed on real
-Pebble Time 2 (Emery) hardware; Gabbro and Chalk still need the same
-re-verification pass the rest of the app already has.
+yet. The Material 3 settings page and the 1.2.2 performance/bugfix round
+(see below) are both confirmed on real Pebble Time 2 (Emery) hardware;
+Gabbro and Chalk still need the same re-verification pass the rest of the
+app already has.
 
 **This round (touch/gesture round) added**: a swipe-to-set-intensity touch
 overlay (a vertical drag anywhere on screen sets vibration level directly
@@ -84,6 +85,26 @@ save/close message-key contract is unchanged, so no watch-side C or
 persisted-storage changes were needed. Confirmed on real Pebble Time 2
 (Emery) hardware; see "Project status" above for what's still outstanding on
 Gabbro/Chalk.
+
+**This round (1.2.2, redraw/resync performance)** cut redundant work found
+during a codebase review, with no intended behavior change except one real
+bug fix: `inbox_received_callback` now only persists and applies a setting
+when the incoming value actually differs from current state, instead of
+redoing the work on every tuple in the phone's full settings resend on
+every app launch — previously this meant an unconditional UI teardown/
+rebuild, several flash writes, and (the actual user-visible bug) the
+gesture-mode hint card popping up on *every* app open rather than only on
+an actual gesture-mode change. Also: `draw_rotated_rect` (every tick/hand/
+needle draw) no longer allocates/frees a `GPath` per call; UP/DOWN no
+longer force a full date/secondary-display recompute (a real Health
+Service query on every press when Chrono's secondary display is Steps or
+Heart Rate); the per-redraw layout-scale calculation is now computed once
+and cached instead of recomputed on every callback; the swipe-intensity
+overlay's two draw procs share one text-layout computation instead of each
+computing it independently on every drag-move event; and the phone-side
+toy-groups JSON is memoized instead of re-parsed on every toy-list refresh.
+Confirmed via emulator smoke test across all 7 platforms and real Pebble
+Time 2 hardware.
 
 **Discrete mode has two selectable faces** — see "Display styles" below:
 
