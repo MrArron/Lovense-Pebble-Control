@@ -278,18 +278,14 @@ static GColor parse_hex_color(const char *hex) {
   return GColorFromRGB(r, g, b);
 }
 
-// Same 8-bit-packed representation as packed_from_hex() below, but from a
-// GColor already in hand - lets inbox_received_callback compare an
-// incoming color against the one currently applied without re-parsing hex
-// or round-tripping through persist storage, so it can skip the
-// persist_write_int()/apply_*_colors() work entirely when nothing changed.
+// 8-bit-packed representation of a GColor already in hand - lets
+// inbox_received_callback compare an incoming color against the one
+// currently applied without round-tripping through persist storage, so it
+// can skip the persist_write_int()/apply_*_colors() work entirely when
+// nothing changed.
 static uint32_t packed_from_color(GColor c) {
   GColor8 raw = c;
   return (uint32_t)raw.argb;
-}
-
-static uint32_t packed_from_hex(const char *hex) {
-  return packed_from_color(parse_hex_color(hex));
 }
 
 static GColor color_from_packed(int packed) {
