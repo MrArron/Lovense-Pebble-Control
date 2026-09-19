@@ -7,11 +7,7 @@ decisions and reasoning; this file is the short version meant for pasting
 straight into a `pebble publish` release-notes field or a store listing
 update.
 
-## [1.2.1] - unreleased (pending local build + hardware verification)
-
-Branch: `m3-settings-redesign`. Not yet merged to `main` — per this repo's
-standing workflow, that happens after the developer personally confirms it
-on real hardware and gives the go-ahead.
+## [1.2.1] - 2026-09-19
 
 ### Added
 
@@ -69,25 +65,36 @@ No fix here changes the save/close message-key contract (`webviewclosed`
 still reads the same keys) or touches watch-side C, so no persisted-storage
 or `AppMessage` key changes are needed.
 
-### Verified (this session, cannot access local build/hardware)
+### Verified (local build + emulator, this session)
 
-- Full-file syntax check (`node --check`) on `src/pkjs/index.js`.
-- A dry-run of the settings-page generator against stub data, confirming
-  valid HTML output with the exact expected preset (16) and swatch
-  (18/18/18/12) counts, correct apostrophe/special-character handling, and
-  no leftover `undefined`/`NaN`.
-- A second dry-run + headless-Chromium screenshot pass after the security
-  fixes, confirming zero page errors and no visual/behavioral regression
-  (host/port fields, Custom-tab live preview, swatch selection).
+- `pebble build` succeeds clean on all 7 target platforms.
+- `pebble install --emulator emery` + `pebble emu-app-config`: full
+  interactive pass over all 4 tabs (Connect / Display / Control / Toys) —
+  all 16 color presets render (including the new "Rose"), Custom-tab
+  swatch selection updates the live preview instantly, tab navigation and
+  the Presets/Custom sub-tabs work, Save triggers the MD3 snackbar
+  ("Settings saved — sending to watch…") with zero JS console errors —
+  including with an attribute-breaking (`"`, `=`) string typed into the
+  host field, confirming the `escapeHtml()` fix doesn't break normal input
+  handling.
+- `pebble install --emulator gabbro` + boot screenshot: Basic-style watch
+  face renders correctly on the round display, no regression.
+- Note: the settings page's Save button closes via
+  `document.location="pebblejs://close#..."`, the real-phone convention —
+  no desktop browser has that protocol registered, so the actual
+  save-to-watch-storage round trip can only be confirmed on a real phone,
+  not via the emulator/browser flow. That leg is covered by the real
+  hardware verification below.
 
 ### Verified (developer, real hardware)
 
-- **Pebble Time 2 (Emery)**: confirmed working, per real-hardware testing.
+- **Pebble Time 2 (Emery)**: confirmed working, including the security-fix
+  commit specifically (the escaping + `JSON.parse` fixes), via the phone
+  companion app's settings flow.
 
 ### Not yet verified
 
-- The MD3 settings page on Gabbro or Chalk.
-- The security-fix commit specifically (it lands after the hardware test
-  above) — the fixes are narrow (escaping + `JSON.parse` instead of a bare
-  `return`) and were re-checked with the same dry-run/screenshot pass, but
-  haven't been through a real device yet.
+- The MD3 settings page on Gabbro or Chalk with a real device (emulator
+  install/boot confirmed above for Gabbro; the settings webview itself
+  still only has emulator-side visual/functional coverage there, per the
+  `pebblejs://close` limitation above).

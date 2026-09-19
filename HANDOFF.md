@@ -1,11 +1,14 @@
 # Handoff: MD3 Settings Redesign (v1.2.1)
 
 Pointer doc for picking this branch up locally to build, test, and publish.
-Written by a cloud session that has no WSL/emulator/hardware access — see
-`CLAUDE.md` for why, and treat everything below as "implemented, not yet
-locally verified" unless a section says otherwise.
+Originally written by a cloud session that had no WSL/emulator/hardware
+access — see `CLAUDE.md` for why. **Superseded 2026-09-19**: local build,
+emulator testing (emery full walkthrough, gabbro boot check), and real
+hardware confirmation (Pebble Time 2, including the security-fix commit)
+are all done — see `CHANGELOG.md`'s "Verified" sections. Kept here as a
+historical record of the original to-do list, not as an open checklist.
 
-## Where things stand
+## Where things stood at handoff (2026-09-18)
 
 - Branch: `m3-settings-redesign` (pushed to `origin`, not merged to `main`)
 - Version bumped: 1.2.0 → 1.2.1 (`package.json`)

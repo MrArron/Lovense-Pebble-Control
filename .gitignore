@@ -4,3 +4,4 @@ node_modules/
 *.pbw
 .claude/*.lock
 .claude/settings.local.json
+.claude/launch.json
