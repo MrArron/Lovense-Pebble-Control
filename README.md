@@ -11,14 +11,16 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Published**, current version **1.2.0**. Confirmed working on real hardware
+**Published**, current version **1.2.1**. Confirmed working on real hardware
 for both touch-capable platforms: Pebble Time 2 (Emery) and Pebble Round 2
 (Gabbro) - boot, Basic mode, both Discrete faces, all three gesture-control
 modes (accelerometer double-knock, and the touchscreen's double-tap/
 long-press/swipe-to-set-intensity), the safety auto-pause timer, and the
 settings page. Chalk (round, non-touch) has only been verified in the
 emulator - no non-Gabbro round hardware has been available to test against
-yet.
+yet. The new Material 3 settings page (see below) is confirmed on real
+Pebble Time 2 (Emery) hardware; Gabbro and Chalk still need the same
+re-verification pass the rest of the app already has.
 
 **This round (touch/gesture round) added**: a swipe-to-set-intensity touch
 overlay (a vertical drag anywhere on screen sets vibration level directly
@@ -61,6 +63,28 @@ required for the settings webview to run under `pebble-tool`'s local JS
 engine (`pypkjs`) at all. Targets now also include `flint` (Pebble 2 Duo) and
 `gabbro` (Pebble Round 2) alongside the original five.
 
+**This round (MD3 settings redesign) added**: a full Material Design 3
+rewrite of the phone-side settings page, from a single-scroll page with
+Presets/Custom/Toy tabs into a 4-tab bottom-nav app (Connect/Display/
+Control/Toys), built from a Claude Design handoff package and seeded from
+Lovense Pink (`#B8004F`) — MD3 color tokens (light/dark, following the
+phone's own System/Light/Dark setting), filled text fields, choice chips,
+ripple state-layer feedback on every interactive surface, a swatch-pop
+animation, and a snackbar replacing the old `alert()` calls for validation/
+conflict messages. Colors moved into a Display-tab sub-section; the custom
+swatch sets expanded from 8/7/10/6 to 18/18/18/12 background/text/accent/
+active options, and a 16th built-in preset ("Rose") was added. A security
+pass on the new page closed two pre-existing gaps it inherited from the old
+page: persisted `customPresets`/`toyGroups` JSON was being spliced into the
+generated page as executable JS source (`return <raw>;` inside a try/catch)
+rather than actually parsed, and the saved host/port/color values were
+spliced into HTML attributes without escaping — both are now safe even if
+`localStorage` were ever corrupted or tampered with outside the app. The
+save/close message-key contract is unchanged, so no watch-side C or
+persisted-storage changes were needed. Confirmed on real Pebble Time 2
+(Emery) hardware; see "Project status" above for what's still outstanding on
+Gabbro/Chalk.
+
 **Discrete mode has two selectable faces** — see "Display styles" below:
 
 - **Analog** — an ordinary analog watch face; the second hand encodes
@@ -96,9 +120,10 @@ mid-session. The default color scheme (both display styles) is now the
 logo (`resources/images/icon~color.png` / `icon~bw.png`).
 
 **Deferred, not yet built**: persisting the selected pattern/toy across app
-restarts, and real-hardware testing/layout tuning for Chalk (the one round
-platform not yet confirmed on physical hardware). See "Extending it" at the
-bottom.
+restarts, real-hardware testing/layout tuning for Chalk (the one round
+platform not yet confirmed on physical hardware), and real-hardware
+verification of the new MD3 settings page on Gabbro and Chalk (Emery only,
+so far). See "Extending it" at the bottom.
 
 **To resume this work in a new session** (local or cloud), the most useful
 things to have on hand are: this README (all the design decisions and
@@ -126,8 +151,9 @@ deferred features above.
 - `src/pkjs/index.js` — companion JS that turns those button presses into
   Lovense Standard API calls (`POST /command`), including native Pulse/Wave
   pattern parameters and toy-connection polling/events, and provides the
-  settings page (connection info, display style, 15 color presets plus a
-  Custom tab and a Toy tab, and a disclaimer/GitHub link). Commands target
+  settings page: a Material Design 3, 4-tab app (Connect/Display/Control/
+  Toys) with 16 color presets plus an 18/18/18/12-swatch Custom color
+  editor under Display, and a disclaimer/GitHub link. Commands target
   every toy currently connected to Lovense Remote, or a saved multi-toy
   group.
 - `package.json` — project manifest (UUID, targets, AppMessage keys,
@@ -387,7 +413,7 @@ restarts it on the new one, using the last known intensity and pattern.
 Selection isn't persisted on either side — both the watch's index and the
 phone's list reset to "All Toys" on relaunch.
 
-**Toy groups**: the settings page's Toy tab lets you check a subset of known
+**Toy groups**: the settings page's Toys tab lets you check a subset of known
 toys, name the group, and save it — groups are appended to the hold-SELECT
 cycle after the individual toys (`{name, toyIds:[]}` in `localStorage`,
 merged into the toy list fresh on every GetToys/Events refresh via
@@ -404,7 +430,7 @@ accent/bezel — not two independently-settable ones. On the wire and on
 persisted storage, they're still separate values (`basic_bg_color`/
 `discrete_bg_color` etc., six `AppMessage` keys / `PERSIST_KEY_BASIC_*` /
 `PERSIST_KEY_DISCRETE_*` on the watch, unchanged since day one), but the
-Custom tab's swatch rows write to both sides of each pair at once
+Custom sub-tab's swatch rows write to both sides of each pair at once
 (`swatchRow()`'s `data-target` takes a space-separated list of hidden-input
 ids now, e.g. `"basicColorBg discreteColorBg"`), so a user only ever sees
 and picks three colors, not six, and the two display styles can't drift
