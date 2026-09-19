@@ -133,13 +133,28 @@ var s_lastPattern = PATTERN_STEADY;
 var s_toyBattery = {}; // toy id -> 0-100, from GetToys / the battery-changed event
 var s_lastSentToyBattery = null; // avoid re-sending the same value to the watch repeatedly
 
-function appendToyGroups(list, knownIds) {
-  var groups = [];
-  try {
-    groups = JSON.parse(localStorage.getItem('toyGroups') || '[]');
-  } catch (e) {
-    groups = [];
+// Memoizes the parsed 'toyGroups' JSON against the raw string it came from,
+// so repeat calls (this runs on every GetToys poll response and every
+// Toy Events 'toy-list' push) skip JSON.parse entirely unless the
+// settings page has actually written a new value since the last call.
+var s_toyGroupsCacheRaw = null;
+var s_toyGroupsCache = [];
+
+function getToyGroups() {
+  var raw = localStorage.getItem('toyGroups') || '[]';
+  if (raw !== s_toyGroupsCacheRaw) {
+    try {
+      s_toyGroupsCache = JSON.parse(raw);
+    } catch (e) {
+      s_toyGroupsCache = [];
+    }
+    s_toyGroupsCacheRaw = raw;
   }
+  return s_toyGroupsCache;
+}
+
+function appendToyGroups(list, knownIds) {
+  var groups = getToyGroups();
   groups.forEach(function (g) {
     var ids = (g.toyIds || []).filter(function (id) { return knownIds[id]; });
     if (ids.length === 0) {
