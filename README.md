@@ -11,7 +11,7 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Published**, current version **1.2.3**. Confirmed working on real hardware
+**Published**, current version **1.2.4**. Confirmed working on real hardware
 for both touch-capable platforms: Pebble Time 2 (Emery) and Pebble Round 2
 (Gabbro) - boot, Basic mode, both Discrete faces, all three gesture-control
 modes (accelerometer double-knock, and the touchscreen's double-tap/
@@ -106,11 +106,15 @@ toy-groups JSON is memoized instead of re-parsed on every toy-list refresh.
 Confirmed via emulator smoke test across all 7 platforms and real Pebble
 Time 2 hardware.
 
-**This round (1.2.3, icon rebrand)** replaced the watch's launcher icon
+**This round (1.2.4, icon rebrand)** replaced the watch's launcher icon
 (`resources/images/icon~color.png` / `icon~bw.png`) with the app's own
 brand mark, dropping the prior Lovense-logo-derived design. Drop-in image
 swap only, no code changes — not re-verified in the emulator or on real
-hardware as part of this round (see `CLAUDE.md`).
+hardware as part of this round (see `CLAUDE.md`). A first upload as 1.2.3
+reached the appstore backend but never became publicly visible (the CLI's
+`--is-published` flag defaults to false, and this app didn't inherit
+visibility automatically as an earlier session had assumed) — 1.2.4
+supersedes it, published with `--is-published` set explicitly.
 
 **Discrete mode has two selectable faces** — see "Display styles" below:
 
