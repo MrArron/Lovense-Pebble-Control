@@ -109,12 +109,12 @@ Time 2 hardware.
 **This round (1.2.4, icon rebrand)** replaced the watch's launcher icon
 (`resources/images/icon~color.png` / `icon~bw.png`) with the app's own
 brand mark, dropping the prior Lovense-logo-derived design. Drop-in image
-swap only, no code changes — not re-verified in the emulator or on real
-hardware as part of this round (see `CLAUDE.md`). A first upload as 1.2.3
-reached the appstore backend but never became publicly visible (the CLI's
-`--is-published` flag defaults to false, and this app didn't inherit
-visibility automatically as an earlier session had assumed) — 1.2.4
-supersedes it, published with `--is-published` set explicitly.
+swap only, no code changes. Confirmed rendering correctly by the developer
+on real hardware. A first upload as 1.2.3 reached the appstore backend but
+never became publicly visible (the CLI's `--is-published` flag defaults to
+false, and this app didn't inherit visibility automatically as an earlier
+session had assumed) — 1.2.4 supersedes it, published with
+`--is-published` set explicitly.
 
 **Discrete mode has two selectable faces** — see "Display styles" below:
 
