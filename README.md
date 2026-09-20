@@ -481,10 +481,11 @@ is rejected with an alert instead of applied.
 ## Presets
 
 The settings page's Colors section has three tabs: **Presets**, **Custom**,
-and **Toy**. Presets is the default — a grid of 15 ready-made looks (the
+and **Toy**. Presets is the default — a grid of 16 ready-made looks (the
 original 12 — Lovense pink, Classic, Midnight, Forest, Plum, Teal, Rust,
-Amber, Slate, Crimson, Violet, Ocean — plus Steel, Ink, and Sand), each a
-small live-rendered tile showing its actual bezel/background/text colors.
+Amber, Slate, Crimson, Violet, Ocean — plus Steel, Ink, Sand, and Rose,
+the last added in the MD3 settings redesign), each a small live-rendered
+tile showing its actual bezel/background/text colors.
 Tapping one sets all six color fields at once (Basic's background/text/
 accent and Discrete's bezel/background/text), using the mapping: Discrete's
 bezel becomes Basic's accent, and Discrete's background/text become Basic's
