@@ -7,6 +7,14 @@ decisions and reasoning; this file is the short version meant for pasting
 straight into a `pebble publish` release-notes field or a store listing
 update.
 
+## [1.2.3] - 2026-09-20
+
+### Changed
+
+- Replaced the watch's launcher icon (`resources/images/icon~color.png` /
+  `icon~bw.png`) with the app's own brand mark, dropping the prior
+  Lovense-logo-derived design. Drop-in image swap only — no code changes.
+
 ## [1.2.1] - 2026-09-19
 
 ### Added

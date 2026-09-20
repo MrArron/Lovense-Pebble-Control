@@ -11,7 +11,7 @@ Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Rem
 
 ## Project status / where this was left off
 
-**Published**, current version **1.2.2**. Confirmed working on real hardware
+**Published**, current version **1.2.3**. Confirmed working on real hardware
 for both touch-capable platforms: Pebble Time 2 (Emery) and Pebble Round 2
 (Gabbro) - boot, Basic mode, both Discrete faces, all three gesture-control
 modes (accelerometer double-knock, and the touchscreen's double-tap/
@@ -106,6 +106,12 @@ toy-groups JSON is memoized instead of re-parsed on every toy-list refresh.
 Confirmed via emulator smoke test across all 7 platforms and real Pebble
 Time 2 hardware.
 
+**This round (1.2.3, icon rebrand)** replaced the watch's launcher icon
+(`resources/images/icon~color.png` / `icon~bw.png`) with the app's own
+brand mark, dropping the prior Lovense-logo-derived design. Drop-in image
+swap only, no code changes — not re-verified in the emulator or on real
+hardware as part of this round (see `CLAUDE.md`).
+
 **Discrete mode has two selectable faces** — see "Display styles" below:
 
 - **Analog** — an ordinary analog watch face; the second hand encodes
@@ -137,8 +143,9 @@ preventing the same color being picked for text and background, and a
 three-state (connecting/connected/disconnected) BT status glyph that blinks
 while connecting and updates immediately if the toy-events socket drops
 mid-session. The default color scheme (both display styles) is now the
-"Lovense pink" preset, and the watch has a launcher icon based on Lovense's
-logo (`resources/images/icon~color.png` / `icon~bw.png`).
+"Lovense pink" preset. The watch's launcher icon
+(`resources/images/icon~color.png` / `icon~bw.png`) is the app's own brand
+mark, not Lovense's logo.
 
 **Deferred, not yet built**: persisting the selected pattern/toy across app
 restarts, real-hardware testing/layout tuning for Chalk (the one round
@@ -182,9 +189,9 @@ deferred features above.
   in code, not loaded from a PNG - the only bundled image resource is the
   launcher icon itself (see `resources/images/`).
 - `resources/images/icon~color.png` / `icon~bw.png` — the watch's launcher
-  icon shown in Pebble OS's app list, based on Lovense's logo in the app's
-  Lovense-pink brand color (color platforms) and a black/white variant
-  (Aplite/Diorite). Declared as a single `MENU_ICON` entry in
+  icon shown in Pebble OS's app list: the app's own brand mark, in color
+  (color platforms) and a black/white variant (Aplite/Diorite). Declared as
+  a single `MENU_ICON` entry in
   `package.json` (`file: "images/icon.png"`) — the `~bw`/`~color` filename
   tags are Pebble's built-in per-platform resource-variant convention, which
   the SDK resolves automatically per target platform. This is required: the
