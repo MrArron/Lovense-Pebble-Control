@@ -18,7 +18,7 @@ function isBluetoothMode() {
 
 var LINK_MODE_HINTS = {
   wifi: 'Uses Lovense Remote\u2019s Game Mode. Needs a Wi-Fi network (internet not required).',
-  bluetooth: 'Works with no Wi-Fi. Needs the Pebble Toy Companion Android app, which connects to the toy directly. Close Lovense Remote first so it lets go of the toy.'
+  bluetooth: 'Works with no Wi-Fi. Needs the Lovense Remote companion Android app (from this app's GitHub releases), which connects to the toy directly. Close the official Lovense Remote app first so it lets go of the toy.'
 };
 
 // Cap on toy/group names shown on the watch. Empirically verified against

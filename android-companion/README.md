@@ -1,7 +1,7 @@
-# Pebble Toy Companion (Android)
+# Lovense Remote companion (Android)
 
-Optional Android app that lets the Lovense Remote watch app work with **no
-Wi-Fi**. Instead of going through Lovense Remote's Game Mode, the Pebble app
+Optional Android app, also named **Lovense Remote** and using the same icon
+as the Pebble store listing, that lets the watch app work with **no Wi-Fi**. Instead of going through the official Lovense Remote app's Game Mode, the Pebble app
 hands the watch's button presses to this app (PebbleKit Android 2), and this
 app drives the toy over Bluetooth LE using Lovense's own command protocol
 (`Vibrate:N;`, `Battery;`, `DeviceType;`, documented by the
@@ -14,7 +14,7 @@ Needs the Core Devices Pebble app 1.0.7.7 or newer, Android 10+.
 1. Install the APK from this repo's GitHub Releases.
 2. Open it and follow the four steps on screen: allow the Pebble app, grant
    Bluetooth, add your toy, then switch the watch app to Bluetooth.
-3. To add the toy, close Lovense Remote first (a toy accepts one connection
+3. To add the toy, close the official Lovense Remote app first (a toy accepts one connection
    at a time and only shows up in a scan when nothing is connected to it),
    switch the toy on, and tap **Find toys**.
 4. In the Pebble app, open the watch app's settings, **Connect** tab, choose
@@ -22,7 +22,7 @@ Needs the Core Devices Pebble app 1.0.7.7 or newer, Android 10+.
 
 From then on, opening the watch app connects to the toy; closing it stops
 the toy and disconnects a minute later. Switching the watch back to Wi-Fi
-makes the companion let go of the toy so Lovense Remote can use it.
+makes the companion let go of the toy so the official app can use it.
 
 ## What works over Bluetooth
 

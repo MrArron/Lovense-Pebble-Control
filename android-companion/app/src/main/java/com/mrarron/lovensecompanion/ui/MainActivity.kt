@@ -127,9 +127,9 @@ fun MainScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Pebble Toy Companion", style = MaterialTheme.typography.headlineSmall)
+        Text("Lovense Remote", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Lets the Lovense Remote watch app control your toy over Bluetooth, with no Wi-Fi needed.",
+            "The companion to the Lovense Remote Pebble watch app. Controls your toy over Bluetooth, with no Wi-Fi needed.",
             style = MaterialTheme.typography.bodyMedium,
         )
 
@@ -154,7 +154,7 @@ fun MainScreen() {
         }
 
         Step("3. Your toys") {
-            if (toys.isEmpty()) Text("No toys yet. Close Lovense Remote (or turn off its Bluetooth link), switch the toy on, then tap Find toys.")
+            if (toys.isEmpty()) Text("No toys yet. Close the official Lovense Remote app (or turn off its Bluetooth link), switch the toy on, then tap Find toys.")
             toys.forEach { ToyRow(it) }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 FilledTonalButton(

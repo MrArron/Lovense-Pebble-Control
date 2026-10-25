@@ -12,16 +12,19 @@ update.
 ### Added
 
 - Bluetooth mode, for using the app with no Wi-Fi at all (Android only).
-  The new optional **Pebble Toy Companion** Android app
+  The new optional **Lovense Remote companion** Android app
   (`android-companion/`) receives the watch's commands from the Core
   Devices Pebble app (PebbleKit Android 2) and drives the toy directly over
-  Bluetooth LE, without Lovense Remote. Steady/Pulse/Wave, intensity,
+  Bluetooth LE, without the official Lovense Remote app. Steady/Pulse/Wave, intensity,
   pause, toy switching, the connection glyph and the toy battery row all
   work. Toy groups stay Wi-Fi only for now.
 - A **Wi-Fi / Bluetooth** choice at the top of the settings page's Connect
   tab. In Bluetooth mode the phone JS stops talking to Game Mode, and the
   watch tells the companion which mode is on (new `link_mode` message key,
   saved on the watch).
+- The companion is named **Lovense Remote** on the phone, like the watch
+  app, and uses the Pebble store icon as its launcher icon.
+- Fuller Pebble store description covering both connection modes.
 
 ## [1.2.4] - 2026-09-20
 

@@ -80,7 +80,7 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: pebble-toy-companion-debug-apk
+          name: lovense-remote-companion-debug-apk
           path: android-companion/app/build/outputs/apk/debug/*.apk
           retention-days: 14
 
@@ -106,9 +106,9 @@ jobs:
         run: |
           cd dist
           mv *.pbw lovense-remote-test.pbw
-          mv *.apk pebble-toy-companion-test-debug.apk
+          mv *.apk lovense-remote-companion-test-debug.apk
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
-          gh release create "$TAG" lovense-remote-test.pbw pebble-toy-companion-test-debug.apk \
+          gh release create "$TAG" lovense-remote-test.pbw lovense-remote-companion-test-debug.apk \
             --repo "$GITHUB_REPOSITORY" --target "$SHA" --prerelease \
             --title "Test build for PR #${{ github.event.pull_request.number }}" \
             --notes "Untested build of ${SHA:0:7}, for trying on a phone. The APK is debug-signed: uninstall it before installing a release build."

@@ -9,12 +9,12 @@ which relays them as HTTP commands to the Lovense Remote app's local
 Pebble watch  --AppMessage-->  Phone (PebbleKit JS)  --HTTP POST-->  Lovense Remote app (Game Mode)  --BLE-->  Toy
 ```
 
-Or, with no Wi-Fi at all (Android only), the optional **Pebble Toy Companion**
-app in [`android-companion/`](android-companion/README.md) talks to the toy
+Or, with no Wi-Fi at all (Android only), the optional **Lovense Remote companion**
+Android app in [`android-companion/`](android-companion/README.md) talks to the toy
 directly over Bluetooth:
 
 ```
-Pebble watch  --AppMessage-->  Pebble app  --PebbleKit 2-->  Pebble Toy Companion  --BLE-->  Toy
+Pebble watch  --AppMessage-->  Pebble app  --PebbleKit 2-->  Lovense Remote companion  --BLE-->  Toy
 ```
 
 Pick between the two on the settings page's **Connect** tab (Wi-Fi or

@@ -112,7 +112,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/*.pbw "dist/lovense-remote-${VERSION}.pbw"
-          cp android-companion/app/build/outputs/apk/release/app-release.apk "dist/pebble-toy-companion-${VERSION}.apk"
+          cp android-companion/app/build/outputs/apk/release/app-release.apk "dist/lovense-remote-companion-${VERSION}.apk"
           (cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
       - name: Create GitHub Release
@@ -123,7 +123,7 @@ jobs:
           ## Lovense Remote for Pebble ${VERSION}
 
           - \`lovense-remote-${VERSION}.pbw\`: the watch app (also on the Pebble app store).
-          - \`pebble-toy-companion-${VERSION}.apk\`: optional Android companion (Android 10+) for Bluetooth control with no Wi-Fi. Sideload it.
+          - \`lovense-remote-companion-${VERSION}.apk\`: optional Android companion (Android 10+) for Bluetooth control with no Wi-Fi. Sideload it.
           - \`SHA256SUMS.txt\`: checksums.
 
           Setup and details: https://github.com/${GITHUB_REPOSITORY}#readme
