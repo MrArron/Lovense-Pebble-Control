@@ -1,7 +1,7 @@
 {
   "name": "lovense-remote",
   "author": "you",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
@@ -41,7 +41,8 @@
       "toy_battery",
       "secondary_display",
       "touch_play_mode",
-      "auto_timeout_minutes"
+      "auto_timeout_minutes",
+      "link_mode"
     ],
     "resources": {
       "media": [
@@ -56,6 +57,17 @@
     "capabilities": [
       "configurable",
       "health"
-    ]
+    ],
+    "companionApp": {
+      "android": {
+        "url": "https://github.com/MrArron/Lovense-Pebble-Control/releases",
+        "apps": [
+          {
+            "package": "com.mrarron.lovensecompanion"
+          }
+        ],
+        "required": false
+      }
+    }
   }
 }

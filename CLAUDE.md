@@ -94,3 +94,14 @@ Established over prior sessions — don't relitigate or rediscover these:
   never revert to the old UUID to "reclaim" the old listing, since that
   would break app identity on hardware that already has the current UUID
   installed.
+- **`android-companion/` is the one allowed second build**, an Android
+  Gradle project (the Bluetooth companion, same layout and release pipeline
+  as the Wrist Assistant repo's `wrist-claude-android/`). It has no
+  `package.json`/`wscript`, so Pebble tooling can't mistake it for a watch
+  app. The rule above still holds for anything Pebble-shaped. Its message
+  key list (`watch/Keys.kt`) must match `package.json`'s `messageKeys`
+  order; `KeysTest` checks this. Build it with
+  `cd android-companion && ./gradlew testDebugUnitTest lintDebug assembleDebug`
+  (needs the Android SDK: platform android-37.2, build-tools 37.0.0); CI
+  (`.github/workflows/ci.yml`) builds both apps on every PR, and a `v*` tag
+  runs `release.yml` (see `docs/RELEASING.md`).

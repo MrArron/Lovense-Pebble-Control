@@ -1,10 +1,25 @@
 // Companion JS that runs on the phone inside the Pebble app.
 // Relays commands received from the watch to the Lovense Remote app's
 // "Game Mode" (Standard API), a local HTTP server on the same network.
+// In Bluetooth mode (linkMode setting) this side stays quiet and the
+// Android companion app (android-companion/) drives the toy directly.
 // Docs: Lovense Standard API / Game Mode, POST http://{ip}:{port}/command
 // Commands target every toy currently connected to Lovense Remote.
 
 var DEFAULT_PORT = '20010';
+
+// Values match the watch's LINK_MODE_* defines.
+var LINK_MODE_WIFI = 0;
+var LINK_MODE_BLUETOOTH = 1;
+
+function isBluetoothMode() {
+  return getSetting('linkMode', 'wifi') === 'bluetooth';
+}
+
+var LINK_MODE_HINTS = {
+  wifi: 'Uses Lovense Remote\u2019s Game Mode. Needs a Wi-Fi network (internet not required).',
+  bluetooth: 'Works with no Wi-Fi. Needs the Pebble Toy Companion Android app, which connects to the toy directly. Close Lovense Remote first so it lets go of the toy.'
+};
 
 // Cap on toy/group names shown on the watch. Empirically verified against
 // Chalk's basic_width (the narrowest case, ~160px) with the persistent
@@ -86,6 +101,9 @@ function queueAppMessage(payload, onSuccess, onError) {
 var APP_NAME = 'Lovense Remote for Pebble';
 
 function postCommand(bodyObj) {
+  if (isBluetoothMode()) {
+    return;
+  }
   var host = getSetting('lovenseHost', '');
   if (!host) {
     console.log('Lovense host not configured yet - open the app settings on your phone.');
@@ -361,7 +379,7 @@ function parseToysField(raw) {
 
 function checkToyConnection() {
   var host = getSetting('lovenseHost', '');
-  if (!host) {
+  if (!host || isBluetoothMode()) {
     return;
   }
   var xhr = new XMLHttpRequest();
@@ -507,11 +525,9 @@ function handleToyEvent(raw) {
 function connectToyEvents() {
   var host = getSetting('lovenseHost', '');
   var port = getSetting('lovensePort', DEFAULT_PORT);
-  if (!host) {
+  closeToyEvents();
+  if (!host || isBluetoothMode()) {
     return;
-  }
-  if (s_toySocket) {
-    try { s_toySocket.close(); } catch (e) { /* already closed */ }
   }
 
   try {
@@ -532,6 +548,7 @@ function connectToyEvents() {
   };
   s_toySocket.onclose = function () {
     console.log('Toy Events socket closed - falling back to GetToys polling.');
+    s_toySocket = null;
     // A reconnect is about to be attempted below - show "connecting" on the
     // watch rather than a stale connected/disconnected reading until either
     // the reconnect's events or the GetToys fallback resolve it for real.
@@ -544,11 +561,34 @@ function connectToyEvents() {
     }
     // Try again shortly, as long as the app is still configured.
     setTimeout(function () {
-      if (getSetting('lovenseHost', '')) {
+      if (getSetting('lovenseHost', '') && !isBluetoothMode() && !s_toySocket) {
         connectToyEvents();
       }
     }, 10000);
   };
+}
+
+function closeToyEvents() {
+  if (s_toySocket) {
+    var old = s_toySocket;
+    s_toySocket = null;
+    // Detach first so its onclose doesn't schedule a reconnect or push a
+    // "connecting" state to the watch.
+    old.onclose = null;
+    old.onerror = null;
+    old.onmessage = null;
+    try { old.close(); } catch (e) { /* already closed */ }
+  }
+  s_eventsAccessGranted = false;
+  stopSocketPing();
+}
+
+function sendLinkModeToWatch() {
+  queueAppMessage({ link_mode: isBluetoothMode() ? LINK_MODE_BLUETOOTH : LINK_MODE_WIFI }, function () {
+    // delivered
+  }, function () {
+    console.log('Failed to send link mode to watch.');
+  });
 }
 
 function sendUiStyleToWatch(uiStyle) {
@@ -650,6 +690,7 @@ Pebble.addEventListener('ready', function () {
   sendDiscreteColorsToWatch();
   sendDiscreteActiveColorToWatch();
   sendBatterySourceToWatch(getSetting('batterySource', 'watch'));
+  sendLinkModeToWatch();
   checkToyConnection(); // immediate baseline before the socket handshake completes
   connectToyEvents();
 });
@@ -658,6 +699,12 @@ Pebble.addEventListener('appmessage', function (e) {
   var command = e.payload.command;
   var intensity = e.payload.intensity;
   var pattern = e.payload.pattern || PATTERN_STEADY;
+
+  if (isBluetoothMode()) {
+    // The Android companion receives these same messages and drives the
+    // toy over Bluetooth; it also owns the toy name/battery/status rows.
+    return;
+  }
 
   // Every button press reaches us as some AppMessage - including "ping",
   // sent when adjusting intensity while paused - so this covers every
@@ -675,7 +722,7 @@ Pebble.addEventListener('appmessage', function (e) {
     s_isActive = false;
     sendStop();
     stopConnectivityPolling();
-  } else if (command === 'ping') {
+  } else if (command === 'ping' || command === 'hello') {
     // Paused-mode UP/DOWN press - the connectivity check above already
     // covered it, nothing further to do.
   } else if (command === 'next_toy') {
@@ -697,6 +744,7 @@ Pebble.addEventListener('appmessage', function (e) {
 Pebble.addEventListener('showConfiguration', function () {
   var host = encodeURIComponent(getSetting('lovenseHost', ''));
   var port = encodeURIComponent(getSetting('lovensePort', DEFAULT_PORT));
+  var linkMode = getEnumSetting('linkMode', ['wifi', 'bluetooth'], 'wifi');
   var uiStyle = getEnumSetting('lovenseUiStyle', ['basic', 'discrete'], 'basic');
   var discreteFace = getEnumSetting('discreteFace', ['analog', 'chrono'], 'analog');
   var batterySource = getEnumSetting('batterySource', ['watch', 'toy'], 'watch');
@@ -999,7 +1047,18 @@ Pebble.addEventListener('showConfiguration', function () {
 
     // ---- CONNECT ----
     '<div id="nav-connect">' +
-    '<p class="m3-section-title">Game Mode Setup</p>' +
+    '<p class="m3-section-title">How to reach the toy</p>' +
+    '<div class="m3-card">' +
+    '<div class="m3-choice-row">' +
+    '<button type="button" class="m3-choice-chip m3-ripple-target' + (linkMode === 'wifi' ? ' active' : '') + '" id="chip-linkMode-wifi" onclick="selectChip(\'linkMode\',\'wifi\')">Wi-Fi</button>' +
+    '<button type="button" class="m3-choice-chip m3-ripple-target' + (linkMode === 'bluetooth' ? ' active' : '') + '" id="chip-linkMode-bluetooth" onclick="selectChip(\'linkMode\',\'bluetooth\')">Bluetooth</button>' +
+    '</div>' +
+    '<input type="hidden" id="linkMode" value="' + linkMode + '">' +
+    '<p class="m3-hint" id="linkModeHint" style="margin-top:8px;margin-bottom:0">' +
+    (linkMode === 'wifi' ? LINK_MODE_HINTS.wifi : LINK_MODE_HINTS.bluetooth) +
+    '</p>' +
+    '</div>' +
+    '<p class="m3-section-title">Game Mode Setup (Wi-Fi)</p>' +
     '<p class="m3-hint">Enable <b>Game Mode</b> in the Lovense Remote app (Discover &gt; Game Mode). Both phones must be on the same Wi-Fi network.</p>' +
     '<div class="m3-card">' +
     '<p class="m3-card-title">Connection</p>' +
@@ -1283,7 +1342,8 @@ Pebble.addEventListener('showConfiguration', function () {
     'uiStyle: { basic: "Shows intensity level and pause/resume status.", discrete: "Disguised as an ordinary watch face." },' +
     'discreteFace: { analog: "Second hand encodes vibration level; idles as real seconds.", chrono: "Digital time with a chrono sub-dial for level." }' +
     '};' +
-    'var CHIP_OPTIONS = { uiStyle: ["basic","discrete"], discreteFace: ["analog","chrono"] };' +
+    'var CHIP_OPTIONS = { uiStyle: ["basic","discrete"], discreteFace: ["analog","chrono"], linkMode: ["wifi","bluetooth"] };' +
+    'CHIP_HINTS.linkMode = ' + JSON.stringify(LINK_MODE_HINTS) + ';' +
     'function selectChip(field, val){' +
     'document.getElementById(field).value = val;' +
     'CHIP_OPTIONS[field].forEach(function(v){' +
@@ -1544,6 +1604,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'var autoTimeoutMinutes=document.querySelector(\'input[name="autoTimeoutMinutes"]:checked\');' +
     'autoTimeoutMinutes=autoTimeoutMinutes?autoTimeoutMinutes.value:"3";' +
     'var result={' +
+    'linkMode:document.getElementById("linkMode").value,' +
     'lovenseHost:host,' +
     'lovensePort:port,' +
     'uiStyle:uiStyle,' +
@@ -1589,9 +1650,30 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (settings.lovensePort !== undefined) {
       localStorage.setItem('lovensePort', settings.lovensePort || DEFAULT_PORT);
     }
-    if (settings.lovenseHost !== undefined || settings.lovensePort !== undefined) {
-      // Host/port changed - reconnect the Toy Events socket to the new address.
+    var linkModeChanged = false;
+    if (settings.linkMode === 'wifi' || settings.linkMode === 'bluetooth') {
+      linkModeChanged = settings.linkMode !== getSetting('linkMode', 'wifi');
+      if (linkModeChanged && settings.linkMode === 'bluetooth') {
+        // Leaving Wi-Fi: stop anything Game Mode is still running and drop
+        // the socket so Lovense Remote isn't holding the toy for us.
+        if (s_isActive) {
+          sendStop();
+        }
+        s_isActive = false;
+        stopConnectivityPolling();
+      }
+      localStorage.setItem('linkMode', settings.linkMode);
+      if (linkModeChanged) {
+        sendLinkModeToWatch();
+      }
+    }
+    if (linkModeChanged || settings.lovenseHost !== undefined || settings.lovensePort !== undefined) {
+      // Host/port or mode changed - (re)connect the Toy Events socket, or
+      // close it in Bluetooth mode.
       connectToyEvents();
+      if (linkModeChanged && !isBluetoothMode()) {
+        checkToyConnection();
+      }
     }
     if (settings.uiStyle !== undefined) {
       localStorage.setItem('lovenseUiStyle', settings.uiStyle);
