@@ -83,3 +83,32 @@ jobs:
           name: pebble-toy-companion-debug-apk
           path: android-companion/app/build/outputs/apk/debug/*.apk
           retention-days: 14
+
+  # Test builds on a GitHub pre-release, so they can be downloaded on a phone (Actions artifacts
+  # need a desktop login). One pre-release per PR, replaced on every push; deleted by hand when done.
+  test-release:
+    name: test release
+    needs: [watch, android]
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: test-pr-${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          cd dist
+          mv *.pbw lovense-remote-test.pbw
+          mv *.apk pebble-toy-companion-test-debug.apk
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create "$TAG" lovense-remote-test.pbw pebble-toy-companion-test-debug.apk \
+            --repo "$GITHUB_REPOSITORY" --target "$SHA" --prerelease \
+            --title "Test build for PR #${{ github.event.pull_request.number }}" \
+            --notes "Untested build of ${SHA:0:7}, for trying on a phone. The APK is debug-signed: uninstall it before installing a release build."
