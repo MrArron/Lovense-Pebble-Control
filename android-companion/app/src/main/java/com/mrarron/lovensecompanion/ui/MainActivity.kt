@@ -54,6 +54,8 @@ import com.mrarron.lovensecompanion.core.Controller
 import com.mrarron.lovensecompanion.core.Toy
 import io.rebble.pebblekit2.client.DefaultPebbleAndroidAppPicker
 import io.rebble.pebblekit2.client.ui.PebbleAppPermissionDialog
+import java.text.DateFormat
+import java.util.Date
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,6 +108,7 @@ fun MainScreen() {
     }
 
     val toys by app.toys.toys.collectAsState()
+    val activity by app.watchActivity.collectAsState()
     val found by scanner.found.collectAsState()
     val scanning by scanner.scanning.collectAsState()
     var scanError by remember { mutableStateOf<String?>(null) }
@@ -169,12 +172,25 @@ fun MainScreen() {
         }
 
         Step("4. On the watch") {
-            Text("In the Pebble app, open the Lovense Remote watch app's settings, go to Connect, and choose Bluetooth.")
+            Text("In the Pebble app, open the Lovense Remote watch app's settings, go to Connect, choose Bluetooth and save. Then open the watch app.")
             Text(
-                if (app.controller.linkMode == Controller.LINK_BLUETOOTH) "The watch is set to Bluetooth."
-                else "The watch hasn't reported Bluetooth mode yet. Open the watch app after changing the setting.",
+                when {
+                    activity.messages == 0 && activity.lastEvent == null ->
+                        "Nothing from the watch app yet. Open it on the watch (version 1.3.0 or newer)."
+                    activity.messages == 0 ->
+                        "The Pebble app told us the watch app opened, but no button presses have arrived yet. Press a button on the watch."
+                    app.controller.linkMode == Controller.LINK_BLUETOOTH -> "The watch is set to Bluetooth."
+                    else -> "The watch is set to Wi-Fi. Change it on the Connect tab of the watch app's settings."
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
+            activity.lastEvent?.let { event ->
+                Text(
+                    "Last from the watch: $event at ${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(activity.lastEventAt))}" +
+                        " · ${activity.messages} message(s)",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }

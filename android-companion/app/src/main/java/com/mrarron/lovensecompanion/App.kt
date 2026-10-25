@@ -9,6 +9,7 @@ import io.rebble.pebblekit2.client.DefaultPebbleAndroidAppPicker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class App : Application() {
     companion object {
@@ -18,6 +19,9 @@ class App : Application() {
 
     /** App-wide scope on the main thread: the controller and the PebbleKit callbacks share it. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** What the Pebble app last told us, shown on the setup screen to help diagnose a silent watch. */
+    val watchActivity = MutableStateFlow(WatchActivity())
 
     lateinit var prefs: Prefs
         private set
@@ -36,3 +40,10 @@ class App : Application() {
         controller = Controller(scope, toys, WatchLink(this, scope), prefs)
     }
 }
+
+data class WatchActivity(
+    val appOpen: Boolean = false,
+    val lastEvent: String? = null,
+    val lastEventAt: Long = 0L,
+    val messages: Int = 0,
+)

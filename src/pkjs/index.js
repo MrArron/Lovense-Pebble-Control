@@ -1058,6 +1058,7 @@ Pebble.addEventListener('showConfiguration', function () {
     (linkMode === 'wifi' ? LINK_MODE_HINTS.wifi : LINK_MODE_HINTS.bluetooth) +
     '</p>' +
     '</div>' +
+    '<div id="wifiSection"' + (linkMode === 'bluetooth' ? ' style="display:none"' : '') + '>' +
     '<p class="m3-section-title">Game Mode Setup (Wi-Fi)</p>' +
     '<p class="m3-hint">Enable <b>Game Mode</b> in the Lovense Remote app (Discover &gt; Game Mode). Both phones must be on the same Wi-Fi network.</p>' +
     '<div class="m3-card">' +
@@ -1072,6 +1073,7 @@ Pebble.addEventListener('showConfiguration', function () {
     '<div class="m3-status-row"><span>Events socket</span><span class="m3-status-val">' + eventsSocketStatus + '</span></div>' +
     '<div class="m3-status-row"><span>Toy connection</span><span class="m3-status-val"' +
     (s_lastKnownConnected ? ' style="color:var(--md-primary)"' : '') + '>' + aggregateStatus + '</span></div>' +
+    '</div>' +
     '</div>' +
     '</div>' +
 
@@ -1352,6 +1354,7 @@ Pebble.addEventListener('showConfiguration', function () {
     'var hintEl = document.getElementById(field+"Hint");' +
     'if (hintEl && CHIP_HINTS[field]) { hintEl.textContent = CHIP_HINTS[field][val]; }' +
     'if (field === "discreteFace") { discreteFace = val; renderPresetGrid(); }' +
+    'if (field === "linkMode") { document.getElementById("wifiSection").style.display = (val === "bluetooth" ? "none" : ""); }' +
     '}' +
 
     'function onFieldInput(el){' +

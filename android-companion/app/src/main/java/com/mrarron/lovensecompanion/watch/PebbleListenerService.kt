@@ -15,15 +15,32 @@ import java.util.UUID
 class PebbleListenerService : BasePebbleListenerService() {
     override suspend fun onMessageReceived(watchappUUID: UUID, data: PebbleDictionary, watch: WatchIdentifier): ReceiveResult {
         if (watchappUUID != Keys.WATCH_UUID) return ReceiveResult.Nack
-        App.get().controller.onMessage(data.toWatchMessage())
+        val msg = data.toWatchMessage()
+        note(true, "\"${msg.command}\" (link_mode ${msg.linkMode ?: "missing"})", countMessage = true)
+        App.get().controller.onMessage(msg)
         return ReceiveResult.Ack
     }
 
     override fun onAppOpened(watchappUUID: UUID, watch: WatchIdentifier) {
-        if (watchappUUID == Keys.WATCH_UUID) App.get().controller.onWatchOpened()
+        if (watchappUUID != Keys.WATCH_UUID) return
+        note(true, "watch app opened")
+        App.get().controller.onWatchOpened()
     }
 
     override fun onAppClosed(watchappUUID: UUID, watch: WatchIdentifier) {
-        if (watchappUUID == Keys.WATCH_UUID) App.get().controller.onWatchClosed()
+        if (watchappUUID != Keys.WATCH_UUID) return
+        note(false, "watch app closed")
+        App.get().controller.onWatchClosed()
+    }
+
+    private fun note(open: Boolean, event: String, countMessage: Boolean = false) {
+        val flow = App.get().watchActivity
+        val old = flow.value
+        flow.value = old.copy(
+            appOpen = open,
+            lastEvent = event,
+            lastEventAt = System.currentTimeMillis(),
+            messages = old.messages + if (countMessage) 1 else 0,
+        )
     }
 }
