@@ -7,7 +7,7 @@ decisions and reasoning; this file is the short version meant for pasting
 straight into a `pebble publish` release-notes field or a store listing
 update.
 
-## [1.3.0] - Unreleased
+## [1.3.0] - 2026-10-26
 
 ### Added
 
