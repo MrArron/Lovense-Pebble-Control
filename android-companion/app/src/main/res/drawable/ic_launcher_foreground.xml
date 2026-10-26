@@ -1,0 +1,17 @@
+<!-- The Pebble store icon's mark (coral "p" with a lens), on the blue ic_launcher_background.
+     Drawn in the store icon's 100-unit space, scaled into the adaptive icon's 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group android:scaleX="0.62" android:scaleY="0.62"
+        android:translateX="19.28" android:translateY="23.62">
+        <path android:strokeColor="#F2604D" android:strokeWidth="19" android:strokeLineCap="round"
+            android:pathData="M32,32L32,84" />
+        <path android:strokeColor="#F2604D" android:strokeWidth="19"
+            android:pathData="M32,38a24,24 0 1 0 48,0a24,24 0 1 0 -48,0z" />
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M44,38a12,12 0 1 0 24,0a12,12 0 1 0 -24,0z" />
+        <path android:fillColor="#0B90E0"
+            android:pathData="M43,31a6,6 0 1 0 12,0a6,6 0 1 0 -12,0z" />
+    </group>
+</vector>

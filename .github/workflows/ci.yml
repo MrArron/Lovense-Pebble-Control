@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    name: watch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Cache Pebble SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pebble-sdk
+          key: pebble-sdk-4.33.1
+
+      - name: Install Pebble tool and SDK 4.33.1
+        run: |
+          uv tool install pebble-tool==5.0.40
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          # A cache hit restores the SDK, and `pebble sdk install` exits 1 when it is already installed.
+          [ -d "$HOME/.local/share/pebble-sdk/SDKs/4.33.1" ] || pebble sdk install 4.33.1
+          pebble sdk activate 4.33.1 || true
+
+      - name: Build watch app (all platforms)
+        run: pebble build
+
+      - name: Upload watch app
+        uses: actions/upload-artifact@v4
+        with:
+          name: lovense-remote-pbw
+          path: build/*.pbw
+          retention-days: 14
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-companion
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: "platform-tools platforms;android-37.2 build-tools;37.0.0"
+
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+
+      - name: Point Gradle at the SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Unit tests, lint, debug APK
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug --stacktrace
+
+      # Debug-signed, so it can't update an installed release APK (uninstall that first).
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lovense-remote-companion-debug-apk
+          path: android-companion/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+  # Test builds on a GitHub pre-release, so they can be downloaded on a phone (Actions artifacts
+  # need a desktop login). One pre-release per PR, replaced on every push; deleted by hand when done.
+  test-release:
+    name: test release
+    needs: [watch, android]
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: test-pr-${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          cd dist
+          mv *.pbw lovense-remote-test.pbw
+          mv *.apk lovense-remote-companion-test-debug.apk
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create "$TAG" lovense-remote-test.pbw lovense-remote-companion-test-debug.apk \
+            --repo "$GITHUB_REPOSITORY" --target "$SHA" --prerelease \
+            --title "Test build for PR #${{ github.event.pull_request.number }}" \
+            --notes "Untested build of ${SHA:0:7}, for trying on a phone. The APK is debug-signed: uninstall it before installing a release build."

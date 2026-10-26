@@ -38,6 +38,12 @@
 #define TOUCH_MODE_TOUCHSCREEN 1
 #define TOUCH_MODE_OFF 2
 
+// How the phone reaches the toy: Wi-Fi = PebbleKit JS -> Lovense Remote's
+// Game Mode; Bluetooth = the Android companion app talks to the toy directly.
+// Sent with every command so whichever side isn't selected stays quiet.
+#define LINK_MODE_WIFI 0
+#define LINK_MODE_BLUETOOTH 1
+
 #define BT_STATE_CONNECTING 0
 #define BT_STATE_CONNECTED 1
 #define BT_STATE_DISCONNECTED 2
@@ -56,6 +62,7 @@
 #define PERSIST_KEY_SECONDARY_DISPLAY 11
 #define PERSIST_KEY_TOUCH_MODE 12
 #define PERSIST_KEY_AUTO_TIMEOUT 13
+#define PERSIST_KEY_LINK_MODE 14
 
 #define TIP_DEFAULT_TEXT "Hold UP/DOWN: pattern\nHold SELECT: toy"
 
@@ -170,6 +177,7 @@ static AppTimer *s_idle_timer = NULL;
 // with no interaction, force a pause. 0 = off. Both timers are only ever
 // armed while s_active - see reset_idle_timer().
 static int s_auto_timeout_minutes = 3;
+static int s_link_mode = LINK_MODE_WIFI;
 static AppTimer *s_auto_timeout_timer = NULL;
 static AppTimer *s_timeout_warning_timer = NULL;
 #define TIMEOUT_WARNING_LEAD_MS 15000
@@ -1273,6 +1281,7 @@ static void send_command_msg(const char *command, int intensity) {
   dict_write_cstring(iter, MESSAGE_KEY_command, command);
   dict_write_int32(iter, MESSAGE_KEY_intensity, intensity);
   dict_write_int32(iter, MESSAGE_KEY_pattern, s_pattern);
+  dict_write_int32(iter, MESSAGE_KEY_link_mode, s_link_mode);
 
   result = app_message_outbox_send();
   if (result != APP_MSG_OK) {
@@ -2206,6 +2215,26 @@ static void rebuild_discrete_face(void) {
   apply_idle_state();
 }
 
+// "hello" carries the current link_mode to whichever phone side is
+// listening. Sent on launch and when link_mode changes, deferred a moment so
+// it doesn't collide with an outbox send already in flight.
+static bool s_hello_pending = false;
+static AppTimer *s_hello_timer = NULL;
+
+static void hello_timer_handler(void *context) {
+  s_hello_timer = NULL;
+  s_hello_pending = false;
+  send_command_msg(s_active ? "vibrate" : "hello", s_intensity);
+}
+
+static void schedule_hello(void) {
+  if (s_hello_timer) {
+    app_timer_reschedule(s_hello_timer, 500);
+  } else {
+    s_hello_timer = app_timer_register(500, hello_timer_handler, NULL);
+  }
+}
+
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
   log_heap("inbox_received_callback start");
 
@@ -2310,6 +2339,19 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     }
   }
 
+  Tuple *link_mode_tuple = dict_find(iterator, MESSAGE_KEY_link_mode);
+  if (link_mode_tuple) {
+    int new_link_mode = (link_mode_tuple->value->int32 == LINK_MODE_BLUETOOTH)
+      ? LINK_MODE_BLUETOOTH : LINK_MODE_WIFI;
+    if (new_link_mode != s_link_mode) {
+      s_link_mode = new_link_mode;
+      persist_write_int(PERSIST_KEY_LINK_MODE, s_link_mode);
+      // Tell the companion right away rather than on the next button press,
+      // so it can connect to (or let go of) the toy.
+      s_hello_pending = true;
+    }
+  }
+
   Tuple *bg_tuple = dict_find(iterator, MESSAGE_KEY_basic_bg_color);
   if (bg_tuple) {
     GColor new_color = parse_hex_color(bg_tuple->value->cstring);
@@ -2383,6 +2425,10 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
   Tuple *command_tuple = dict_find(iterator, MESSAGE_KEY_command);
   if (command_tuple) {
     APP_LOG(APP_LOG_LEVEL_DEBUG, "Ack from phone: %s", command_tuple->value->cstring);
+  }
+
+  if (s_hello_pending) {
+    schedule_hello();
   }
 
   log_heap("after inbox_received_callback");
@@ -2503,6 +2549,9 @@ static void init(void) {
   s_auto_timeout_minutes = persist_exists(PERSIST_KEY_AUTO_TIMEOUT)
     ? persist_read_int(PERSIST_KEY_AUTO_TIMEOUT)
     : 3;
+  s_link_mode = persist_exists(PERSIST_KEY_LINK_MODE)
+    ? persist_read_int(PERSIST_KEY_LINK_MODE)
+    : LINK_MODE_WIFI;
 
   recompute_basic_pattern_color();
   recompute_discrete_muted();
@@ -2516,6 +2565,7 @@ static void init(void) {
   app_message_register_inbox_received(inbox_received_callback);
   app_message_register_inbox_dropped(inbox_dropped_callback);
   app_message_open(APP_MESSAGE_INBOX_SIZE, APP_MESSAGE_OUTBOX_SIZE);
+  schedule_hello();
 
   log_heap("init end");
   window_stack_push(s_window, true);
@@ -2525,6 +2575,9 @@ static void deinit(void) {
   // Full stop for safety when the app closes, regardless of whether we were
   // paused or active.
   send_command_msg("stop", 0);
+  if (s_hello_timer) {
+    app_timer_cancel(s_hello_timer);
+  }
   if (s_idle_timer) {
     app_timer_cancel(s_idle_timer);
   }
